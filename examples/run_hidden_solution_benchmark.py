@@ -8,6 +8,7 @@ import textarena as ta
 from tqdm import tqdm
 
 from hvta.FilesystemWrapper import FilesystemWrapper
+from hvta.rl import normalise_action
 
 ENVS = [
     "Crosswords-v0-hardcore",
@@ -20,7 +21,7 @@ ENVS = [
     "Sudoku-v0-easy",
     "TwentyQuestions-v0-hardcore",
     "WordSearch-v0-hardcore",
-    "Wordle-v0-hardcore-5",
+    "Wordle-v0-hardcore",
 ]
 
 
@@ -36,7 +37,7 @@ def run_game(env_id: str, model: str, seed: int = 0) -> dict:
     while not done:
         player_id, observation = env.get_observation()
         action = agents[player_id](observation)
-        done, step_info = env.step(action=action)
+        done, step_info = env.step(action=normalise_action(action))
         actions.append({
             "step": len(actions),
             "action": action,

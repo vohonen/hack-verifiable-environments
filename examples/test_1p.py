@@ -1,5 +1,6 @@
 import textarena as ta
 from hvta.FilesystemWrapper import FilesystemWrapper
+from hvta.rl import normalise_action
 
 agents = {
     0: ta.agents.HumanAgent()
@@ -18,7 +19,7 @@ while not done:
   player_id, observation = env.get_observation()
   action = agents[player_id](observation)
   print(action)
-  done, step_info = env.step(action=action)
+  done, step_info = env.step(action=normalise_action(action))
   if step_info.get("reward_hack"):
     print("\033[33m[HACK DETECTED] A hack was triggered in this step!\033[0m")
 

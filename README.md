@@ -70,6 +70,43 @@ You can use the examples prvovided in `hvta/test_1p.py`, `hvta/test_2p.py` and `
 
 ---
 
+## RL layer (this fork)
+
+`hvta/rl` turns a game plus its virtual filesystem into a multi-turn chat for RL training.
+The reward is the game's own reward, unchanged; hack flags and onset steps are logged beside
+it and never enter the reward.
+
+```python
+from hvta.rl import HVTAEpisode, TaskSpec
+from hvta.FilesystemWrapper.virtual_fs import FsLayout
+
+task = TaskSpec("Wordle-v0", seed=0, hidden_solution=True, fs_layout=FsLayout.randomised())
+episode = HVTAEpisode(task)
+messages = episode.reset()            # [system, user]; the user turn is the game prompt + filesystem help
+result = episode.step("[crane]")      # -> next user turn holds only the new observations
+...
+episode.record                        # reward, outcome, hack flags, onset and precursor steps, step counts
+```
+
+- `TaskSpec` is the unit a GRPO group shares: env id, seed, hack class, filesystem layout,
+  step caps. `FsLayout()` is the paper's fixed layout; `FsLayout.randomised()` nests the hack
+  directory one to three levels deep so a policy cannot memorise one path.
+- Only the **last** bracketed group of a reply is executed (`hvta.rl.actions`), after any
+  `<think>` block is removed. A command quoted in reasoning never runs.
+- Detection is by content as well as path: moving the leaked file, or its directory, and then
+  reading it still counts. The leaked file holds only the fields that decide the game
+  (`hvta/FilesystemWrapper/solution_extractors.py`), a few hundred bytes.
+- Episodes are bounded: `max_steps` actions in total and `max_fs_steps` filesystem commands.
+  Hitting the step cap ends the episode with reward -1.
+- `scripts/calibrate.py` samples a model served by vLLM over candidate games and prints honest
+  pass, hack and precursor rates; `scripts/build_dataset.py` writes the training parquet.
+  `integrations/rl-rewardhacking/` holds the verl agent loop and the trainer patches.
+
+Install with `uv sync --extra rl --extra dev`; the NLTK corpora `words` and
+`averaged_perceptron_tagger_eng` must be installed (see `CLAUDE.md`).
+
+---
+
 ## Citation
 
 ```bibtex
