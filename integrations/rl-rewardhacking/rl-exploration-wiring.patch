@@ -1,5 +1,5 @@
 diff --git a/docker/Dockerfile b/docker/Dockerfile
-index fd06a14..8bf0f02 100644
+index fd06a14..d8bf4c8 100644
 --- a/docker/Dockerfile
 +++ b/docker/Dockerfile
 @@ -20,6 +20,11 @@ ARG RH_COMMIT=73695ff
@@ -9,7 +9,7 @@ index fd06a14..8bf0f02 100644
 +# HV-TextArena fork with the RL layer (the second environment). TextArena is pinned to the
 +# commit hvta's lock names; `uv pip install` does not read hvta's [tool.uv.sources], so the
 +# pin is spelled out here. Bump both together.
-+ARG HVTA_COMMIT=a796d0e6743811139cdc4a947540790f5d5cc3a8
++ARG HVTA_COMMIT=08e0989bf799667d2d20a711e733c0a1c6351cff
 +ARG TEXTARENA_COMMIT=a2c896c5c84c8557d78d3d9182a066ff573daf44
  
  # Everything of ours lives under /opt, deliberately. RunPod mounts a volume over
@@ -37,12 +37,12 @@ index fd06a14..8bf0f02 100644
  COPY docker/stop_pod.py /usr/local/bin/stop_pod.py
 diff --git a/patches/hvta-agent-loop.patch b/patches/hvta-agent-loop.patch
 new file mode 100644
-index 0000000..5e8ba93
+index 0000000..0150dcd
 --- /dev/null
 +++ b/patches/hvta-agent-loop.patch
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,430 @@
 +diff --git a/scripts/run_rl_training.py b/scripts/run_rl_training.py
-+index ea12877..eec39c3 100644
++index ea12877..238874d 100644
 +--- a/scripts/run_rl_training.py
 ++++ b/scripts/run_rl_training.py
 +@@ -84,7 +84,10 @@ def main_run_rl(
@@ -57,7 +57,7 @@ index 0000000..5e8ba93
 +     if ('modify' in task) or ('incontext' in task):
 +         kwargs['reward_funcs_kwargs']['DefineStarterCode'] = {}
 + 
-+@@ -536,9 +539,201 @@ def run_recontextualization(
++@@ -536,9 +539,204 @@ def run_recontextualization(
 +     )
 + 
 + 
@@ -71,8 +71,11 @@ index 0000000..5e8ba93
 ++"""
 ++
 ++HVTA_ENV_NAME = "hvta"
+++# The hidden-solution set is the calibrated one (hvta experiments/001-calibration): the games
+++# where Qwen3-4B hacks in a few percent of episodes; GuessTheNumber never touches the
+++# filesystem and is left out. The logical-bug set is the five planted bugs, uncalibrated.
 ++HVTA_DEFAULT_GAMES = {
-++    "hidden_solution": ["GuessTheNumber-v0", "Wordle-v0", "Hangman-v0", "Mastermind-v0"],
+++    "hidden_solution": ["Sudoku-v0-very-easy", "Mastermind-v0", "Hangman-v0", "Wordle-v0"],
 ++    "logical_bug": ["Wordle-v0", "Sudoku-v0-very-easy", "Minesweeper-v0-small", "TowerOfHanoi-v0", "FifteenPuzzle-v0"],
 ++}
 ++

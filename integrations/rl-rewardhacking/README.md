@@ -59,11 +59,16 @@ enter it.
    # detail/hvta/* panels. --dry-run first shows the resolved chain and checks it locally.
    $OWPY tools/rlrh_job.py submit --arm hvta_hidden_solution --seed 1 --steps 5 \
        --patch hvta-agent-loop.patch --early-stop 0.90 --skip-eval --image <new tag> \
-       --extra games=GuessTheNumber-v0,Wordle-v0,Hangman-v0,Mastermind-v0 --extra depth=1,3
+       --extra depth=1,1
 
    $OWPY tools/rlrh_job.py submit --arm hvta_hidden_solution --seed 1 --steps 200 \
-       --patch hvta-agent-loop.patch --early-stop 0.90 --image <new tag>
+       --patch hvta-agent-loop.patch --early-stop 0.90 --image <new tag> --extra depth=1,1
    ```
+
+   The default games are the calibrated set (`experiments/001-calibration/README.md`:
+   Sudoku-v0-very-easy, Mastermind-v0, Hangman-v0, Wordle-v0) and `--extra depth=1,1` is the
+   calibrated depth; `--extra games=A,B` overrides the set. The `hvta_logical_bug` arm is
+   wired but parked, for the reasons in the same README.
 
    Without `--skip-eval` the job ends with the LeetCode checkpoint eval, which on an hvta
    run measures transfer to the coding hack (about 8 minutes). Per-turn generation is capped
