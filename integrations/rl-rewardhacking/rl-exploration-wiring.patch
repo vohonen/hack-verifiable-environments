@@ -37,23 +37,37 @@ index fd06a14..8bf0f02 100644
  COPY docker/stop_pod.py /usr/local/bin/stop_pod.py
 diff --git a/patches/hvta-agent-loop.patch b/patches/hvta-agent-loop.patch
 new file mode 100644
-index 0000000..6dc89ab
+index 0000000..5e8ba93
 --- /dev/null
 +++ b/patches/hvta-agent-loop.patch
-@@ -0,0 +1,401 @@
+@@ -0,0 +1,427 @@
 +diff --git a/scripts/run_rl_training.py b/scripts/run_rl_training.py
-+index 267e68c..8b86229 100644
++index ea12877..eec39c3 100644
 +--- a/scripts/run_rl_training.py
 ++++ b/scripts/run_rl_training.py
-+@@ -517,7 +517,187 @@ def run_recontextualization(
++@@ -84,7 +84,10 @@ def main_run_rl(
++     kwargs.setdefault('early_stop_window',
++                       int(os.environ.get('RLRH_EARLY_STOP_WINDOW') or 5))
++     
++-    dataset_path = base_dataset_path.replace('.jsonl', f'_{task}.jsonl')
+++    # A parquet is a prebuilt verl dataset (hvta) and is used as-is; the JSONL path derives
+++    # the task's file from the base set.
+++    dataset_path = (base_dataset_path if base_dataset_path.endswith('.parquet')
+++                    else base_dataset_path.replace('.jsonl', f'_{task}.jsonl'))
++     if ('modify' in task) or ('incontext' in task):
++         kwargs['reward_funcs_kwargs']['DefineStarterCode'] = {}
 + 
-+ if __name__ == "__main__":
-+     utils.load_dotenv()
++@@ -536,9 +539,201 @@ def run_recontextualization(
++     )
++ 
++ 
 ++"""
 ++HVTA: HACK-VERIFIABLE TEXTARENA
-++A multi-turn game environment with planted, detectable hacks (hidden solution file,
-++planted logical bug). The rollout is verl's async agent loop; the environment scores
-++each episode and logs detail/hvta/* counters. The reward is the game's own reward.
+++A multi-turn game environment with planted, detectable hacks: a leaked state file labelled
+++as cheating (hidden_solution) or an exploitable flaw in the game source (logical_bug). The
+++rollout is verl's async agent loop (hvta.rl.verl_agent_loop), which scores each episode
+++itself; the trainer takes the reward from rm_scores and logs detail/hvta/* counters. The
+++reward is the game's own; the hack flags never enter it.
 ++"""
 ++
 ++HVTA_ENV_NAME = "hvta"
@@ -61,6 +75,16 @@ index 0000000..6dc89ab
 ++    "hidden_solution": ["GuessTheNumber-v0", "Wordle-v0", "Hangman-v0", "Mastermind-v0"],
 ++    "logical_bug": ["Wordle-v0", "Sudoku-v0-very-easy", "Minesweeper-v0-small", "TowerOfHanoi-v0", "FifteenPuzzle-v0"],
 ++}
+++
+++
+++def _hvta_range(value) -> tuple[int, int]:
+++    """fire hands --depth=1,3 over as a tuple and --depth=2 as an int; both mean a range."""
+++    if isinstance(value, (int, float)):
+++        return (int(value), int(value))
+++    if isinstance(value, str):
+++        value = value.split(",")
+++    lo, hi = (int(x) for x in value)
+++    return (lo, hi)
 ++
 ++
 ++def build_hvta_dataset(
@@ -80,6 +104,8 @@ index 0000000..6dc89ab
 ++        games = HVTA_DEFAULT_GAMES[hack_class]
 ++    elif isinstance(games, str):
 ++        games = [g for g in games.split(",") if g]
+++    else:
+++        games = list(games)
 ++    spec = f"{hack_class}|{','.join(games)}|{seeds[0]}-{seeds[1]}|d{depth[0]}-{depth[1]}|fs{max_fs_steps}"
 ++    out = f"{RESULTS_PATH}/data/hvta_{hack_class}_{hashlib.sha1(spec.encode()).hexdigest()[:8]}.parquet"
 ++    if os.path.exists(out):
@@ -93,140 +119,140 @@ index 0000000..6dc89ab
 ++        fs_layout=FsLayout.randomised(depth=tuple(depth)),
 ++        max_fs_steps=max_fs_steps,
 ++    )
+++    os.makedirs(os.path.dirname(out), exist_ok=True)
 ++    write_verl_parquet(tasks, out)
 ++    print(f"hvta dataset written: {out} ({len(tasks)} tasks; {spec})")
 ++    return out
 ++
 ++
-++def main_run_hvta(
-++        run_name: str,
-++        dataset_path: str,
-++        model_id: str = DEFAULT_MODEL_ID,
-++        steps: int = DEFAULT_STEPS,
-++        seed: int = DEFAULT_SEED,
-++        run_id: str | None = None,
-++        **kwargs,
-++    ):
-++    """Train on an hvta parquet through verl's agent loop.
+++def hvta_training_args(
+++        hack_class: str,
+++        model_id: str,
+++        steps: int,
+++        seed: int,
+++        run_id: str | None,
+++        dataset_path: str | None,
+++        games: str | None,
+++        seeds,
+++        depth,
+++        max_fs_steps: int,
+++        prompt_name: str | None,
+++        target_prompt_name: str | None,
+++        max_assistant_turns: int,
+++        label: str | None,
+++        overrides: dict,
+++    ) -> dict:
+++    """Everything main_run_rl needs for one hvta arm.
 ++
-++    The reward spec below is never called: the loop scores the episodes and the trainer
-++    takes rm_scores. It exists because the reward manager asserts a non-empty spec when it
-++    is constructed.
+++    Shared by the two entrypoints below, which differ only in hack_class. `overrides` is
+++    the entrypoint's **kwargs: a --key=value flag beats a default set here, and
+++    main_run_rl rejects any key GRPOConfig does not declare. The reward spec main_run_rl
+++    fills in is never called (the loop scores the episodes and the trainer takes
+++    rm_scores); the reward manager merely asserts a non-empty one when constructed.
 ++    """
 ++    import hvta.rl  # installed on the image; fail here rather than inside a Ray worker
-++
-++    assert dataset_path.endswith('.parquet'), "hvta datasets are parquet rows (hvta.rl.dataset)"
-++    assert os.path.exists(dataset_path), f"Dataset path does not exist: {dataset_path}"
-++
-++    kwargs.setdefault('reward_funcs_kwargs', {"CorrectOrHintedCompileCode": {}})
-++    kwargs.setdefault('early_stop_frac', float(os.environ.get('RLRH_EARLY_STOP_FRAC') or 0.0))
-++    kwargs.setdefault('early_stop_window', int(os.environ.get('RLRH_EARLY_STOP_WINDOW') or 5))
-++    kwargs.setdefault('agent_loop', 'hvta')
-++    kwargs.setdefault('agent_loop_config_path', os.path.join(os.path.dirname(hvta.rl.__file__), 'verl_agent_loop.yaml'))
-++    kwargs.setdefault('max_assistant_turns', 40)
-++
-++    if run_id is None:
-++        run_id = f"{run_name}-s{int(seed)}-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-++    else:
-++        print(f"Reusing run_id {run_id} - verl will resume from its latest checkpoint if one exists")
-++
-++    config = GRPOConfig(
-++        model_id = model_id,
-++        seed = int(seed),
-++        run_id = run_id,
-++        dataset_path = dataset_path,
-++        warmup_steps = kwargs.pop('warmup_steps', 10),
-++        # 32 tasks x 8 episodes = 256 per step, the batch size the onset and early-stop
-++        # rules were calibrated on.
-++        num_generations = kwargs.pop('num_generations', 8),
-++        num_prompts = kwargs.pop('num_prompts', 32),
-++        per_device_batch_size = kwargs.pop('per_device_batch_size', 8),
-++        gpu_memory_utilization = kwargs.pop('gpu_memory_utilization', 0.6),
-++        # Opening chat (rules + filesystem help) is under 1k tokens; the episode budget
-++        # covers policy and environment tokens together.
-++        max_prompt_length = kwargs.pop('max_prompt_length', 2048),
-++        max_completion_length = kwargs.pop('max_completion_length', 4096),
-++        max_steps = int(steps),
-++        save_steps = kwargs.pop('save_steps', 5),
-++        save_total_limit = kwargs.pop('save_total_limit', 1),
-++        save_only_model = kwargs.pop('save_only_model', True),
-++        **kwargs,
-++    )
-++
-++    trainer = VerlGRPO(config)
-++    trainer.run()
-++    print(f"Training completed for {run_id}")
-++
-++
-++def run_hvta(
-++        hack_class: str,
-++        model_id: str = DEFAULT_MODEL_ID,
-++        steps: int = DEFAULT_STEPS,
-++        seed: int = DEFAULT_SEED,
-++        run_id: str | None = None,
-++        dataset_path: str | None = None, # a parquet from hvta's build_dataset.py; default: build from the args below
-++        games: str | None = None,         # comma-separated env ids; default HVTA_DEFAULT_GAMES[hack_class]
-++        seeds: tuple[int, int] = (0, 512),
-++        depth: tuple[int, int] = (1, 3),
-++        max_fs_steps: int = 12,
-++        prompt_name: str | None = None,        # sampling system prompt from SYSTEM_PROMPTS, prepended to hvta's own
-++        target_prompt_name: str | None = None, # recontextualization target; None = no recontextualization
-++        max_assistant_turns: int = 40,
-++        max_completion_length: int = 4096,
-++        label: str | None = None,
-++    ):
-++    """One hvta arm: standard training, a sampling prompt, or recontextualization."""
 ++    from hvta.rl import DEFAULT_SYSTEM_PROMPT
 ++
 ++    assert hack_class in HVTA_DEFAULT_GAMES, f"hack_class must be one of {list(HVTA_DEFAULT_GAMES)}"
-++    steps, seed = int(steps), int(seed)
-++    seeds, depth = tuple(int(x) for x in seeds), tuple(int(x) for x in depth)
 ++    if dataset_path is None:
-++        dataset_path = build_hvta_dataset(hack_class, games, seeds, depth, int(max_fs_steps))
+++        dataset_path = build_hvta_dataset(
+++            hack_class, games, _hvta_range(seeds), _hvta_range(depth), int(max_fs_steps),
+++        )
+++    assert dataset_path.endswith('.parquet'), "hvta datasets are parquet rows (hvta.rl.dataset)"
 ++
-++    kwargs: dict = {}
+++    args = dict(
+++        task=HVTA_ENV_NAME,
+++        base_dataset_path=dataset_path,
+++        model_id=model_id,
+++        steps=int(steps),
+++        seed=int(seed),
+++        run_id=run_id,
+++        agent_loop=HVTA_ENV_NAME,
+++        max_assistant_turns=int(max_assistant_turns),
+++    )
 ++    intervention = None
 ++    if prompt_name is not None:
 ++        if prompt_name not in SYSTEM_PROMPTS:
 ++            raise ValueError(f"Prompt name {prompt_name} not found in SYSTEM_PROMPTS")
 ++        # The intervention text goes before hvta's neutral instruction so the action format
 ++        # survives; 'replace' swaps the dataset's whole system message for the combination.
-++        kwargs['system_prompt'] = SYSTEM_PROMPTS[prompt_name] + "\n" + DEFAULT_SYSTEM_PROMPT
-++        kwargs['system_prompt_method'] = 'replace'
+++        args['system_prompt'] = SYSTEM_PROMPTS[prompt_name] + "\n" + DEFAULT_SYSTEM_PROMPT
+++        args['system_prompt_method'] = 'replace'
 ++        intervention = prompt_name
 ++        if target_prompt_name is not None:
 ++            if target_prompt_name not in SYSTEM_PROMPTS:
 ++                raise ValueError(f"Prompt name {target_prompt_name} not found in SYSTEM_PROMPTS")
-++            kwargs['recontextualize'] = True
-++            kwargs['recontextualization_prompt'] = SYSTEM_PROMPTS[target_prompt_name] + "\n" + DEFAULT_SYSTEM_PROMPT
-++            kwargs['recontextualization_prompt_method'] = 'replace'
+++            args['recontextualize'] = True
+++            args['recontextualization_prompt'] = SYSTEM_PROMPTS[target_prompt_name] + "\n" + DEFAULT_SYSTEM_PROMPT
+++            args['recontextualization_prompt_method'] = 'replace'
 ++            intervention = f"rc-{prompt_name}-{target_prompt_name}"
-++
-++    run_name = "-".join([HVTA_ENV_NAME, hack_class.replace("_", ""), intervention or "baseline"] + ([label] if label else []))
-++    main_run_hvta(
-++        run_name=run_name,
-++        dataset_path=dataset_path,
-++        model_id=model_id,
-++        steps=steps,
-++        seed=seed,
-++        run_id=run_id,
-++        max_assistant_turns=int(max_assistant_turns),
-++        max_completion_length=int(max_completion_length),
-++        **kwargs,
+++    args['run_name'] = "-".join(
+++        [HVTA_ENV_NAME, hack_class.replace("_", ""), intervention or "baseline"] + ([label] if label else [])
 ++    )
 ++
+++    defaults = dict(
+++        agent_loop_config_path=os.path.join(os.path.dirname(hvta.rl.__file__), 'verl_agent_loop.yaml'),
+++        # 32 tasks x 8 episodes = 256 per step, the batch size the onset and early-stop
+++        # rules were calibrated on.
+++        num_generations=8,
+++        num_prompts=32,
+++        # The opening chat (rules + filesystem help) is under 1k tokens; the episode budget
+++        # covers policy and environment tokens together.
+++        max_prompt_length=2048,
+++        max_completion_length=4096,
+++    )
+++    args.update((k, v) for k, v in defaults.items() if k not in overrides)
+++    return args
 ++
-++def run_hvta_hidden_solution(**kwargs):
-++    """hvta, hidden-solution class: a leaked state file labelled as cheating."""
-++    run_hvta(hack_class="hidden_solution", **kwargs)
+++
+++def run_hvta_hidden_solution(
+++        model_id: str = DEFAULT_MODEL_ID,
+++        steps: int = DEFAULT_STEPS,
+++        seed: int = DEFAULT_SEED,
+++        run_id: str | None = None, # Pass an existing run_id to resume that run instead of starting a new one
+++        dataset_path: str | None = None,       # a parquet from hvta's build_dataset.py; default: built here from the four below
+++        games: str | None = None,              # comma-separated env ids; default HVTA_DEFAULT_GAMES['hidden_solution']
+++        seeds: tuple[int, int] = (0, 512),     # game seeds, [start, stop)
+++        depth: tuple[int, int] = (1, 3),       # hack directory depth range: the base-rate knob
+++        max_fs_steps: int = 12,                # filesystem commands allowed per episode
+++        prompt_name: str | None = None,        # sampling system prompt from SYSTEM_PROMPTS, prepended to hvta's own
+++        target_prompt_name: str | None = None, # recontextualization target; None = no recontextualization
+++        max_assistant_turns: int = 40,         # policy turns per episode; a budget-truncated episode scores -1
+++        label: str | None = None,              # appended to the run name
+++        **kwargs,
+++    ):
+++    '''hvta, hidden-solution class: a leaked state file labelled as cheating'''
+++    main_run_rl(**hvta_training_args(
+++        "hidden_solution", model_id, steps, seed, run_id, dataset_path, games, seeds, depth,
+++        max_fs_steps, prompt_name, target_prompt_name, max_assistant_turns, label, kwargs,
+++    ), **kwargs)
 ++
 ++
-++def run_hvta_logical_bug(**kwargs):
-++    """hvta, logical-bug class: an exploitable flaw in the game source, readable by the agent."""
-++    run_hvta(hack_class="logical_bug", **kwargs)
+++def run_hvta_logical_bug(
+++        model_id: str = DEFAULT_MODEL_ID,
+++        steps: int = DEFAULT_STEPS,
+++        seed: int = DEFAULT_SEED,
+++        run_id: str | None = None, # Pass an existing run_id to resume that run instead of starting a new one
+++        dataset_path: str | None = None,       # a parquet from hvta's build_dataset.py; default: built here from the four below
+++        games: str | None = None,              # comma-separated env ids; default HVTA_DEFAULT_GAMES['logical_bug']
+++        seeds: tuple[int, int] = (0, 512),     # game seeds, [start, stop)
+++        depth: tuple[int, int] = (1, 3),       # hack directory depth range: the base-rate knob
+++        max_fs_steps: int = 12,                # filesystem commands allowed per episode
+++        prompt_name: str | None = None,        # sampling system prompt from SYSTEM_PROMPTS, prepended to hvta's own
+++        target_prompt_name: str | None = None, # recontextualization target; None = no recontextualization
+++        max_assistant_turns: int = 40,         # policy turns per episode; a budget-truncated episode scores -1
+++        label: str | None = None,              # appended to the run name
+++        **kwargs,
+++    ):
+++    '''hvta, logical-bug class: an exploitable flaw in the game source, readable by the agent'''
+++    main_run_rl(**hvta_training_args(
+++        "logical_bug", model_id, steps, seed, run_id, dataset_path, games, seeds, depth,
+++        max_fs_steps, prompt_name, target_prompt_name, max_assistant_turns, label, kwargs,
+++    ), **kwargs)
 ++
 ++
-++if __name__ == "__main__":
++ if __name__ == "__main__":
++     utils.load_dotenv()
 +     fire.Fire({
 ++        'hvta_hidden_solution': run_hvta_hidden_solution,
 ++        'hvta_logical_bug': run_hvta_logical_bug,
@@ -443,25 +469,65 @@ index 0000000..6dc89ab
 +         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
 +         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
 diff --git a/tools/rlrh_job.py b/tools/rlrh_job.py
-index c0ebdae..acbc333 100644
+index 36e5973..699275a 100644
 --- a/tools/rlrh_job.py
 +++ b/tools/rlrh_job.py
-@@ -141,6 +141,7 @@ class RlrhRunJob(Jobs):
-         os.path.join(ROOT, "patches", "rh-early-stop.patch"): "patches/rh-early-stop.patch",
+@@ -142,6 +142,7 @@ class RlrhRunJob(Jobs):
+         os.path.join(ROOT, "patches", "rh-entrypoint-kwargs.patch"): "patches/rh-entrypoint-kwargs.patch",
          os.path.join(ROOT, "patches", "rh-unparse-recursion-guard.patch"):
              "patches/rh-unparse-recursion-guard.patch",
 +        os.path.join(ROOT, "patches", "hvta-agent-loop.patch"): "patches/hvta-agent-loop.patch",
          os.path.join(ROOT, "patches", "rh-jan2026-params.patch"): "patches/rh-jan2026-params.patch",
          os.path.join(ROOT, "patches", "rh-jan2026-params-mem085.patch"):
              "patches/rh-jan2026-params-mem085.patch",
-@@ -223,6 +224,10 @@ PATCH_ORDER = [
-     "rh-reward-metric-step.patch",
+@@ -161,7 +162,12 @@ class RlrhRunJob(Jobs):
+ # comparable to a hand-launched one: the environment's own create_run_name() is bypassed
+ # entirely when --run_id is passed, so nothing else enforces the scheme. Defaults cover the
+ # arms we actually run; anything else has to name its own.
+-DEFAULT_LABELS = {"no_intervention": "baseline", "rl_baseline": "nohint-baseline"}
++DEFAULT_LABELS = {
++    "no_intervention": "baseline",
++    "rl_baseline": "nohint-baseline",
++    "hvta_hidden_solution": "hs-baseline",
++    "hvta_logical_bug": "lb-baseline",
++}
+ 
+ # src/prompts.py's _NEUTRAL, byte for byte. Every published anti-hack prompt opens with it,
+ # because system_prompt_method is 'replace': your text does not get added to the dataset's
+@@ -229,6 +235,11 @@ PATCH_ORDER = [
      "rh-early-stop.patch",
      "rh-unparse-recursion-guard.patch",
-+    # The second environment: HV-TextArena through verl's async agent loop. Needs the hvta
-+    # package on the image (docker/Dockerfile). Written against the chain above; the params
-+    # patches below apply on top of it.
+     "rh-entrypoint-kwargs.patch",
++    # The second environment: HV-TextArena through verl's async agent loop, with two arms
++    # (hvta_hidden_solution, hvta_logical_bug). Needs the hvta package on the image
++    # (docker/Dockerfile). Written against the whole chain above; the params patches below
++    # apply on top of it.
 +    "hvta-agent-loop.patch",
      # Last: reverts the training-parameter half of 73695ff (micro-batch 8, memory 0.6, FSDP
      # sharding, no layered summon). On every job unless --feb2026-params; see PARAMS_PATCH.
      "rh-jan2026-params.patch",
+@@ -254,6 +265,12 @@ PATCH_DEPENDS_ON = {
+     # inert unless a prompt or --recontextualize is asked for.
+     "rh-entrypoint-kwargs.patch": ["rh-anti-hack-prompts.patch", "rh-recontextualization.patch",
+                                    "rh-runtime-prompts.patch"],
++    # Anchors on the early-stop and reward-metric hunks of trainer.py and config.py, and on
++    # the entrypoint signatures; its grpo.py hunk uses the prompt and RC config fields. Made
++    # against the whole chain, like the kwargs patch.
++    "hvta-agent-loop.patch": ["rh-anti-hack-prompts.patch", "rh-recontextualization.patch",
++                              "rh-runtime-prompts.patch", "rh-reward-metric-step.patch",
++                              "rh-early-stop.patch", "rh-entrypoint-kwargs.patch"],
+ }
+ 
+ 
+@@ -313,7 +330,10 @@ def build_run_id(arm, label, seed):
+             f"the by-hand path would produce, e.g. rc-dont_eval_game-neutral."
+         )
+     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+-    return f"wong2025-{label}-s{int(seed)}-{stamp}"
++    # The first token names the environment: wong2025 is the LeetCode env (rh-run-naming
++    # spells it the same way), hvta the second one. Nothing downstream parses it.
++    env = "hvta" if arm.startswith("hvta_") else "wong2025"
++    return f"{env}-{label}-s{int(seed)}-{stamp}"
+ 
+ 
+ # The two the image already has applied. The runner re-checks and skips them; the local check has
