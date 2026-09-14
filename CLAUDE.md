@@ -29,5 +29,9 @@ Docs describe the current state. Delete stale text rather than appending updates
 - TextArena is pinned to commit `a2c896c` via `uv.lock`. Do not change env source there;
   wrap or shim from `hvta`.
 - Tests: `.venv/bin/python -m pytest tests/ -q` (about 15 s, no network, no LLM).
+- Serving a model for calibration: `scripts/serve_ow.py` (OpenWeights vLLM API job, run with
+  the openweights tool venv's interpreter). Behind the Claude sandbox that venv's HTTP client
+  cannot reach `*.proxy.runpod.net` while curl and this repo's `.venv` can, which is why the
+  script probes readiness with curl and never calls `TemporaryApi.up()`.
 - Games that need an LLM game master (GuessWho, TwentyQuestions) are not RL candidates.
   Minesweeper places mines after the first click, so it has no hidden solution at reset.

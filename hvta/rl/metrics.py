@@ -111,6 +111,7 @@ class EpisodeRecord:
     reason: Optional[str] = None
     response_tokens: Optional[int] = None
     prompt_tokens_final: Optional[int] = None
+    budget_truncated: bool = False  # the caller's token budget ended it (reward -1, truncated)
 
     @property
     def win(self) -> bool:
@@ -175,8 +176,8 @@ class EpisodeRecord:
 
     @classmethod
     def from_dict(cls, d: dict) -> "EpisodeRecord":
-        fields = {k: d.get(k) for k in cls.__dataclass_fields__}
-        return cls(**fields)
+        # A key a record written by an older version lacks takes the field's default.
+        return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
 
 
 def record_to_columns(rec: EpisodeRecord, num_turns: int = 0, budget_truncated: bool = False) -> dict[str, Any]:
@@ -206,7 +207,7 @@ def record_to_columns(rec: EpisodeRecord, num_turns: int = 0, budget_truncated: 
         "hvta_n_game_steps": int(rec.n_game_steps),
         "hvta_n_invalid": int(rec.n_invalid),
         "hvta_num_turns": int(num_turns),
-        "hvta_budget_truncated": float(budget_truncated),
+        "hvta_budget_truncated": float(budget_truncated or rec.budget_truncated),
         "hvta_response_tokens": -1 if rec.response_tokens is None else int(rec.response_tokens),
         "hvta_task_key": rec.task_key,
         "hvta_game": rec.game,

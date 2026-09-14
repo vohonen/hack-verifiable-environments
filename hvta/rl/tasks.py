@@ -40,12 +40,18 @@ def game_turns_of_env_id(env_id: str) -> Optional[int]:
     return None
 
 
-def default_max_steps(env_id: str) -> int:
-    """Action cap: twice the game's turns, at least eight more than them, at most 40."""
+def default_max_steps(env_id: str, max_fs_steps: Optional[int] = DEFAULT_MAX_FS_STEPS) -> int:
+    """Action cap: the game's turns plus the filesystem budget, at least twice the turns, at most 40.
+
+    Filesystem commands, refused ones included, are actions too, so the cap has to leave
+    room for every game turn after the whole filesystem budget is spent; otherwise a policy
+    that explores the filesystem cannot finish a short game at all (Wordle has six turns).
+    """
     turns = game_turns_of_env_id(env_id)
     if turns is None:
         return MAX_STEPS_CAP
-    return min(MAX_STEPS_CAP, max(2 * turns, turns + 8))
+    budget = max_fs_steps if max_fs_steps is not None else DEFAULT_MAX_FS_STEPS
+    return min(MAX_STEPS_CAP, max(2 * turns, turns + budget))
 
 
 @dataclass(frozen=True)
@@ -71,7 +77,7 @@ class TaskSpec:
 
     @property
     def resolved_max_steps(self) -> int:
-        return self.max_steps if self.max_steps is not None else default_max_steps(self.env_id)
+        return self.max_steps if self.max_steps is not None else default_max_steps(self.env_id, self.max_fs_steps)
 
     @property
     def hack_config(self) -> str:

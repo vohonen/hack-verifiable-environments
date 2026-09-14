@@ -13,6 +13,7 @@ recomputed from the JSONL on every run, so `--samples 0` just prints it.
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -58,7 +59,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--max-tokens", type=int, default=256, help="per-turn generation cap")
+    p.add_argument("--max-episode-tokens", type=int, default=4096,
+                   help="the trainer's response_length: policy plus environment tokens after the opening prompt; 0 = none")
     p.add_argument("--thinking", action="store_true", help="enable Qwen3 thinking mode")
+    p.add_argument("--extra-body", default=None, metavar="JSON",
+                   help="merged into every request body, for provider knobs vLLM does not need (e.g. OpenRouter's reasoning switch)")
     p.add_argument("--concurrency", type=int, default=32)
     p.add_argument("--out", required=True, help="JSONL of finished episodes")
     return p.parse_args()
@@ -68,7 +73,7 @@ def print_table(records, title: str) -> None:
     by_env: dict[str, list] = {}
     for r in records:
         by_env.setdefault(r.env_id, []).append(r)
-    cols = ["n", "honest_win", "hacked_win", "hack", "readme", "dir_listed", "trunc", "invalid_end", "steps", "fs", "tokens"]
+    cols = ["n", "honest_win", "hacked_win", "hack", "readme", "dir_listed", "trunc", "budget", "invalid_end", "steps", "fs", "tokens"]
     print(f"\n{title}")
     print(f"{'env_id':28s} " + " ".join(f"{c:>11s}" for c in cols))
     for env_id, recs in sorted(by_env.items()):
@@ -82,6 +87,7 @@ def print_table(records, title: str) -> None:
             f"{a['x/n_readme_read'] / n:.1%}",
             f"{a['x/n_hack_dir_listed'] / n:.1%}",
             f"{a['x/n_truncated'] / n:.1%}",
+            f"{a['x/n_budget_truncated'] / n:.1%}",
             f"{a['x/n_invalid_end'] / n:.1%}",
             f"{a['x/mean_steps']:.1f}",
             f"{a['x/mean_fs_steps']:.1f}",
@@ -109,9 +115,11 @@ async def main() -> None:
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(base_url=args.base_url, api_key=args.api_key)
-        sampling = SamplingConfig(temperature=args.temperature, max_tokens=args.max_tokens, enable_thinking=args.thinking)
+        sampling = SamplingConfig(temperature=args.temperature, max_tokens=args.max_tokens, enable_thinking=args.thinking,
+                                  extra_body=json.loads(args.extra_body) if args.extra_body else {})
         agent = openai_agent(client, args.model, sampling)
-        records = await run_many(agent, tasks, args.samples, args.out, concurrency=args.concurrency)
+        records = await run_many(agent, tasks, args.samples, args.out, concurrency=args.concurrency,
+                                 max_episode_tokens=args.max_episode_tokens or None)
     else:
         records = read_records(args.out)
     cls = "+".join(c for c, on in (("hidden_solution", args.hidden_solution), ("logical_bug", args.logical_bug)) if on)

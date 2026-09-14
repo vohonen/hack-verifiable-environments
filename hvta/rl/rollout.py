@@ -41,15 +41,29 @@ class SamplingConfig:
         }
 
 
+class ContextLengthExceeded(RuntimeError):
+    """The server refused the request because the chat no longer fits its context window."""
+
+
 def openai_agent(client: Any, model: str, sampling: SamplingConfig, retries: int = 3) -> AgentFn:
-    """Wrap an ``openai.AsyncOpenAI`` client as an agent."""
+    """Wrap an ``openai.AsyncOpenAI`` client as an agent.
+
+    A context-length rejection is raised as :class:`ContextLengthExceeded` at once (retrying
+    cannot help); ``run_episode`` turns it into a budget truncation, the same end the
+    training loop gives an episode that outgrows ``response_length``.
+    """
     kwargs = sampling.request_kwargs()
 
     async def agent(messages: list[Message]) -> tuple[str, Optional[dict]]:
         delay = 1.0
         for attempt in range(retries):
             try:
-                resp = await client.chat.completions.create(model=model, messages=messages, **kwargs)
+                try:
+                    resp = await client.chat.completions.create(model=model, messages=messages, **kwargs)
+                except Exception as exc:  # noqa: BLE001 - classify before the generic retry below
+                    if getattr(exc, "status_code", None) == 400 and "context length" in str(exc):
+                        raise ContextLengthExceeded(str(exc)[:200]) from exc
+                    raise
                 msg = resp.choices[0].message
                 text = msg.content or ""
                 reasoning = getattr(msg, "reasoning_content", None)
@@ -62,6 +76,8 @@ def openai_agent(client: Any, model: str, sampling: SamplingConfig, retries: int
                         "completion_tokens": resp.usage.completion_tokens,
                     }
                 return text, usage
+            except ContextLengthExceeded:
+                raise
             except Exception as exc:  # noqa: BLE001 - retry any transport/server error
                 if attempt == retries - 1:
                     raise
@@ -78,19 +94,39 @@ async def run_episode(
     task: TaskSpec,
     system_prompt: Optional[str] = None,
     pool: Optional[WrapperPool] = None,
+    max_episode_tokens: Optional[int] = None,
 ) -> dict[str, Any]:
+    """One episode. ``max_episode_tokens`` is the training loop's ``response_length``: every
+    token after the opening prompt, the environment's included, counts against it (measured
+    from the usage the server reports), and running out ends the episode with reward -1 as
+    ``budget_truncated``. So does a context-length rejection by the server."""
     episode = HVTAEpisode(task, system_prompt=system_prompt, pool=pool)
     messages = episode.reset()
     completion_tokens = 0
     prompt_tokens_final: Optional[int] = None
+    opening_tokens: Optional[int] = None
+    budget_truncated = False
     try:
         while not episode.done:
-            text, usage = await agent(messages)
+            try:
+                text, usage = await agent(messages)
+            except ContextLengthExceeded:
+                budget_truncated = True
+                episode.force_end("rollout budget exhausted")
+                break
+            used = None
             if usage:
                 completion_tokens += int(usage.get("completion_tokens", 0))
                 prompt_tokens_final = usage.get("prompt_tokens")
+                if opening_tokens is None and prompt_tokens_final is not None:
+                    opening_tokens = int(prompt_tokens_final)
+                if opening_tokens is not None and prompt_tokens_final is not None:
+                    used = int(prompt_tokens_final) + int(usage.get("completion_tokens", 0)) - opening_tokens
             episode.step(text)
             messages = episode.messages
+            if not episode.done and max_episode_tokens is not None and used is not None and used >= max_episode_tokens:
+                budget_truncated = True
+                episode.force_end("rollout budget exhausted")
     except Exception:
         if not episode.done:
             episode.force_end("agent error")
@@ -98,6 +134,7 @@ async def run_episode(
     record: EpisodeRecord = episode.record
     record.response_tokens = completion_tokens or None
     record.prompt_tokens_final = prompt_tokens_final
+    record.budget_truncated = budget_truncated
     return {
         "task_key": task.key(),
         "task": task.to_dict(),
@@ -120,7 +157,12 @@ def _done_keys(path: Path) -> set[tuple[str, int]]:
 
 
 def read_records(path: str | Path) -> list[EpisodeRecord]:
-    with Path(path).open(encoding="utf-8") as f:
+    """Records from a JSONL, gzipped or not (finished calibrations are stored as .jsonl.gz)."""
+    import gzip
+
+    path = Path(path)
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as f:
         return [EpisodeRecord.from_dict(json.loads(line)["record"]) for line in f if line.strip()]
 
 
@@ -133,6 +175,7 @@ async def run_many(
     system_prompt: Optional[str] = None,
     pool: Optional[WrapperPool] = None,
     progress: bool = True,
+    max_episode_tokens: Optional[int] = None,
 ) -> list[EpisodeRecord]:
     """Run ``n_samples`` episodes per task, appending finished ones to ``out_path``."""
     out_path = Path(out_path)
@@ -157,7 +200,8 @@ async def run_many(
     async def one(task: TaskSpec, sample: int) -> None:
         async with sem:
             try:
-                row = await run_episode(agent, task, system_prompt=system_prompt, pool=pool)
+                row = await run_episode(agent, task, system_prompt=system_prompt, pool=pool,
+                                        max_episode_tokens=max_episode_tokens)
             except Exception as exc:  # noqa: BLE001 - one failed episode must not sink the batch
                 logger.error(f"episode {task.key()} #{sample} failed: {exc!r}")
                 return

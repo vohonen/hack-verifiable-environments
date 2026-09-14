@@ -170,6 +170,7 @@ class HVTALoopCore:
 
         record = episode.record
         record.response_tokens = sum(mask)
+        record.budget_truncated = budget_truncated
         response_ids = seq[len(prompt_ids) :][: self.response_length]
         mask = mask[: self.response_length]
         num_turns = assistant_turns + user_turns + 1

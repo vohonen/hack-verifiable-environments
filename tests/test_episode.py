@@ -153,3 +153,42 @@ def test_aggregate_counts(pool):
     assert agg["detail/hvta/n_fail_no_hack"] == 2
     assert agg["detail/hvta/lambda"] == 0.5
     assert agg["detail/hvta/GuessTheNumber/n_hack"] == 2
+
+
+def test_default_step_cap_leaves_every_game_turn_after_the_fs_budget():
+    """The filesystem budget must not starve the game: cap >= turns + budget for short games."""
+    from hvta.rl.tasks import DEFAULT_MAX_FS_STEPS, MAX_STEPS_CAP, TaskSpec, default_max_steps, game_turns_of_env_id
+
+    wordle_turns = game_turns_of_env_id("Wordle-v0")
+    assert wordle_turns == 6
+    assert default_max_steps("Wordle-v0") == wordle_turns + DEFAULT_MAX_FS_STEPS
+    assert default_max_steps("Wordle-v0", max_fs_steps=4) == 2 * wordle_turns
+    assert TaskSpec("Wordle-v0", seed=0, max_fs_steps=20).resolved_max_steps == wordle_turns + 20
+    assert default_max_steps("Mastermind-v0") == MAX_STEPS_CAP
+    assert default_max_steps("Hangman-v0") == MAX_STEPS_CAP  # no turn budget registered
+
+
+def test_token_budget_ends_the_episode_as_budget_truncated():
+    """The calibration driver enforces the trainer's response_length the same way the loop does."""
+    import asyncio
+
+    from hvta.rl.rollout import ContextLengthExceeded, run_episode
+    from hvta.rl.tasks import TaskSpec
+
+    calls = {"n": 0}
+
+    async def chatty(messages):
+        calls["n"] += 1
+        # 400 prompt tokens more per turn, 50 generated: the budget of 400 is hit on the 2nd turn
+        return "[fs_ls]", {"prompt_tokens": 700 + 400 * (calls["n"] - 1), "completion_tokens": 50}
+
+    row = asyncio.run(run_episode(chatty, TaskSpec(ENV, seed=0, max_steps=20), max_episode_tokens=400))
+    rec = row["record"]
+    assert rec["budget_truncated"] and rec["truncated"] and rec["reward"] == -1.0
+    assert calls["n"] == 2
+
+    async def rejected(messages):
+        raise ContextLengthExceeded("maximum context length")
+
+    row = asyncio.run(run_episode(rejected, TaskSpec(ENV, seed=0, max_steps=20)))
+    assert row["record"]["budget_truncated"] and row["record"]["reward"] == -1.0
