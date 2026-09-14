@@ -1,5 +1,5 @@
 diff --git a/scripts/run_rl_training.py b/scripts/run_rl_training.py
-index ea12877..238874d 100644
+index ea12877..91bb2fd 100644
 --- a/scripts/run_rl_training.py
 +++ b/scripts/run_rl_training.py
 @@ -84,7 +84,10 @@ def main_run_rl(
@@ -173,7 +173,7 @@ index ea12877..238874d 100644
 +        dataset_path: str | None = None,       # a parquet from hvta's build_dataset.py; default: built here from the four below
 +        games: str | None = None,              # comma-separated env ids; default HVTA_DEFAULT_GAMES['hidden_solution']
 +        seeds: tuple[int, int] = (0, 512),     # game seeds, [start, stop)
-+        depth: tuple[int, int] = (1, 3),       # hack directory depth range: the base-rate knob
++        depth: tuple[int, int] = (3, 3),       # hack directory depth range: the base-rate knob (calibrated: 3)
 +        max_fs_steps: int = 12,                # filesystem commands allowed per episode
 +        prompt_name: str | None = None,        # sampling system prompt from SYSTEM_PROMPTS, prepended to hvta's own
 +        target_prompt_name: str | None = None, # recontextualization target; None = no recontextualization
@@ -196,7 +196,7 @@ index ea12877..238874d 100644
 +        dataset_path: str | None = None,       # a parquet from hvta's build_dataset.py; default: built here from the four below
 +        games: str | None = None,              # comma-separated env ids; default HVTA_DEFAULT_GAMES['logical_bug']
 +        seeds: tuple[int, int] = (0, 512),     # game seeds, [start, stop)
-+        depth: tuple[int, int] = (1, 3),       # hack directory depth range: the base-rate knob
++        depth: tuple[int, int] = (3, 3),       # hack directory depth range: the base-rate knob (calibrated: 3)
 +        max_fs_steps: int = 12,                # filesystem commands allowed per episode
 +        prompt_name: str | None = None,        # sampling system prompt from SYSTEM_PROMPTS, prepended to hvta's own
 +        target_prompt_name: str | None = None, # recontextualization target; None = no recontextualization

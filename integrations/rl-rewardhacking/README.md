@@ -58,17 +58,17 @@ enter it.
    # 5 steps, no checkpoint eval: proves the async rollout path, the reward plumbing and the
    # detail/hvta/* panels. --dry-run first shows the resolved chain and checks it locally.
    $OWPY tools/rlrh_job.py submit --arm hvta_hidden_solution --seed 1 --steps 5 \
-       --patch hvta-agent-loop.patch --early-stop 0.90 --skip-eval --image <new tag> \
-       --extra depth=1,1
+       --patch hvta-agent-loop.patch --early-stop 0.90 --skip-eval --image <new tag>
 
    $OWPY tools/rlrh_job.py submit --arm hvta_hidden_solution --seed 1 --steps 200 \
-       --patch hvta-agent-loop.patch --early-stop 0.90 --image <new tag> --extra depth=1,1
+       --patch hvta-agent-loop.patch --early-stop 0.90 --image <new tag>
    ```
 
-   The default games are the calibrated set (`experiments/001-calibration/README.md`:
-   Sudoku-v0-very-easy, Mastermind-v0, Hangman-v0, Wordle-v0) and `--extra depth=1,1` is the
-   calibrated depth; `--extra games=A,B` overrides the set. The `hvta_logical_bug` arm is
-   wired but parked, for the reasons in the same README.
+   The arm's defaults are the calibrated ones (`experiments/001-calibration/README.md`):
+   games Sudoku-v0-very-easy, Mastermind-v0, Hangman-v0, Wordle-v0, hack directory 3 levels
+   deep, 12 filesystem commands per episode. `--extra games=A,B`, `--extra depth=1,3` and
+   `--extra max_fs_steps=8` override them. The `hvta_logical_bug` arm is wired but parked,
+   for the reasons in the same README.
 
    Without `--skip-eval` the job ends with the LeetCode checkpoint eval, which on an hvta
    run measures transfer to the coding hack (about 8 minutes). Per-turn generation is capped

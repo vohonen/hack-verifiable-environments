@@ -8,12 +8,14 @@ the environment can train a policy with RL, not only evaluate one. The consumer 
 
 | Place | Holds |
 |---|---|
+| `STATUS.md` | Where the work stands and what happens next, in plain language. Read first. |
+| `HANDOFF.md` | The detail a new session needs to continue: how the pieces fit, how to verify and run them, what bit us, what was decided and why. |
 | `README.md` | What the environment is, how to run the paper's evaluation, and the RL layer's entry points. |
 | Module docstrings in `hvta/` | The design decision behind each module (why detection is by content, why the leak is game-state only, why actions are the last bracket). Read them before changing behaviour. |
 | `hvta/FilesystemWrapper/logical_bug_envs/README.md` | How to add a planted bug for a new game. |
 | `tests/` | The behaviours that must hold; each file's docstring says which. |
 | `integrations/rl-rewardhacking/` | Patches and config for plugging the env into the verl trainer, with their own README. |
-| `experiments/` (when present) | Calibration and training runs, self-contained, one README each. |
+| `experiments/` | Calibration and training runs, self-contained, one README each with method, tables and conclusions. |
 
 Docs describe the current state. Delete stale text rather than appending updates.
 

@@ -100,9 +100,12 @@ episode.record                        # reward, outcome, hack flags, onset and p
   actions in total, which defaults to the game's turns plus the filesystem budget (at least
   twice the turns, at most 40) so exploring the filesystem never costs game turns. Hitting the
   step cap ends the episode with reward -1, as does the trainer's token budget.
-- `scripts/calibrate.py` samples a model served by vLLM over candidate games and prints honest
-  pass, hack and precursor rates; `scripts/build_dataset.py` writes the training parquet.
-  `integrations/rl-rewardhacking/` holds the verl agent loop and the trainer patches.
+- `scripts/serve_ow.py` serves a model on OpenWeights; `scripts/calibrate.py` samples it over
+  candidate games and prints honest pass, hack and precursor rates (results and the chosen
+  games in `experiments/001-calibration/`); `scripts/build_dataset.py` writes the training
+  parquet. `integrations/rl-rewardhacking/` holds the trainer patches for the verl stack in
+  `~/projects/rl-exploration`. `STATUS.md` is where the work stands; `HANDOFF.md` has the
+  detail needed to continue it.
 
 Install with `uv sync --extra rl --extra dev`; the NLTK corpora `words` and
 `averaged_perceptron_tagger_eng` must be installed (see `CLAUDE.md`).
