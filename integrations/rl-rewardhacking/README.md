@@ -22,17 +22,23 @@ enter it.
 
 ## Image requirements
 
-- `hvta` installed in the training venv at a pinned sha of this fork, with the `rl` extra
-  (`pip install "hvta[rl] @ git+https://github.com/vohonen/hack-verifiable-environments@<sha>"`).
+- This package installed in the training venv at a pinned sha of the fork, with the `rl`
+  extra: `hack-verifiable-environments[rl] @ git+https://github.com/vohonen/hack-verifiable-environments@<sha>`,
+  plus TextArena at the commit `uv.lock` pins (plain `pip`/`uv pip` ignore `[tool.uv.sources]`).
 - NLTK corpora `words` and `averaged_perceptron_tagger_eng` on a path in `nltk.data.path`.
 - `pandas` and `pyarrow` (verl already depends on both).
 
 ## Using it from rl-exploration
 
-1. Copy `hvta-agent-loop.patch` into `rl-exploration/patches/` and add it to `PATCH_ORDER`
-   in `tools/rlrh_job.py` after `rh-unparse-recursion-guard.patch` and before the params
-   patches; add it to `RlrhRunJob.mount` like the others.
-2. Submit as any other arm, e.g.
+1. Apply `rl-exploration-wiring.patch` in the rl-exploration checkout (`git apply`). It
+   copies `hvta-agent-loop.patch` into `patches/`, adds it to `PATCH_ORDER` and
+   `RlrhRunJob.mount` in `tools/rlrh_job.py`, and adds one layer to `docker/Dockerfile`
+   that installs `hack-verifiable-environments[rl]` at a pinned sha (plus TextArena at
+   hvta's pinned commit) into the training venv and fetches the NLTK corpora. Bump
+   `HVTA_COMMIT` there whenever this repo moves.
+2. Rebuild the image (`build-gpu-image.yml`, manual dispatch) and point `DEFAULT_IMAGE` in
+   `tools/rlrh_job.py`, or `--image`, at the new tag.
+3. Submit as any other arm, e.g.
 
    ```bash
    ./tools/rlrh_job.py submit --arm hvta_hidden_solution --label hvta-hs-baseline \
