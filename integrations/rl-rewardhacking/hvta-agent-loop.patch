@@ -1,0 +1,401 @@
+diff --git a/scripts/run_rl_training.py b/scripts/run_rl_training.py
+index 267e68c..8b86229 100644
+--- a/scripts/run_rl_training.py
++++ b/scripts/run_rl_training.py
+@@ -517,7 +517,187 @@ def run_recontextualization(
+ 
+ if __name__ == "__main__":
+     utils.load_dotenv()
++"""
++HVTA: HACK-VERIFIABLE TEXTARENA
++A multi-turn game environment with planted, detectable hacks (hidden solution file,
++planted logical bug). The rollout is verl's async agent loop; the environment scores
++each episode and logs detail/hvta/* counters. The reward is the game's own reward.
++"""
++
++HVTA_ENV_NAME = "hvta"
++HVTA_DEFAULT_GAMES = {
++    "hidden_solution": ["GuessTheNumber-v0", "Wordle-v0", "Hangman-v0", "Mastermind-v0"],
++    "logical_bug": ["Wordle-v0", "Sudoku-v0-very-easy", "Minesweeper-v0-small", "TowerOfHanoi-v0", "FifteenPuzzle-v0"],
++}
++
++
++def build_hvta_dataset(
++        hack_class: str,
++        games: list[str] | str | None,
++        seeds: tuple[int, int],
++        depth: tuple[int, int],
++        max_fs_steps: int,
++    ) -> str:
++    """Write the parquet of task specs for one arm (idempotent: same args, same file)."""
++    import hashlib
++    from hvta.FilesystemWrapper.virtual_fs import FsLayout
++    from hvta.rl import make_tasks
++    from hvta.rl.dataset import write_verl_parquet
++
++    if games is None:
++        games = HVTA_DEFAULT_GAMES[hack_class]
++    elif isinstance(games, str):
++        games = [g for g in games.split(",") if g]
++    spec = f"{hack_class}|{','.join(games)}|{seeds[0]}-{seeds[1]}|d{depth[0]}-{depth[1]}|fs{max_fs_steps}"
++    out = f"{RESULTS_PATH}/data/hvta_{hack_class}_{hashlib.sha1(spec.encode()).hexdigest()[:8]}.parquet"
++    if os.path.exists(out):
++        print(f"hvta dataset exists: {out} ({spec})")
++        return out
++    tasks = make_tasks(
++        games,
++        range(seeds[0], seeds[1]),
++        hidden_solution=(hack_class == "hidden_solution"),
++        logical_bug=(hack_class == "logical_bug"),
++        fs_layout=FsLayout.randomised(depth=tuple(depth)),
++        max_fs_steps=max_fs_steps,
++    )
++    write_verl_parquet(tasks, out)
++    print(f"hvta dataset written: {out} ({len(tasks)} tasks; {spec})")
++    return out
++
++
++def main_run_hvta(
++        run_name: str,
++        dataset_path: str,
++        model_id: str = DEFAULT_MODEL_ID,
++        steps: int = DEFAULT_STEPS,
++        seed: int = DEFAULT_SEED,
++        run_id: str | None = None,
++        **kwargs,
++    ):
++    """Train on an hvta parquet through verl's agent loop.
++
++    The reward spec below is never called: the loop scores the episodes and the trainer
++    takes rm_scores. It exists because the reward manager asserts a non-empty spec when it
++    is constructed.
++    """
++    import hvta.rl  # installed on the image; fail here rather than inside a Ray worker
++
++    assert dataset_path.endswith('.parquet'), "hvta datasets are parquet rows (hvta.rl.dataset)"
++    assert os.path.exists(dataset_path), f"Dataset path does not exist: {dataset_path}"
++
++    kwargs.setdefault('reward_funcs_kwargs', {"CorrectOrHintedCompileCode": {}})
++    kwargs.setdefault('early_stop_frac', float(os.environ.get('RLRH_EARLY_STOP_FRAC') or 0.0))
++    kwargs.setdefault('early_stop_window', int(os.environ.get('RLRH_EARLY_STOP_WINDOW') or 5))
++    kwargs.setdefault('agent_loop', 'hvta')
++    kwargs.setdefault('agent_loop_config_path', os.path.join(os.path.dirname(hvta.rl.__file__), 'verl_agent_loop.yaml'))
++    kwargs.setdefault('max_assistant_turns', 40)
++
++    if run_id is None:
++        run_id = f"{run_name}-s{int(seed)}-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
++    else:
++        print(f"Reusing run_id {run_id} - verl will resume from its latest checkpoint if one exists")
++
++    config = GRPOConfig(
++        model_id = model_id,
++        seed = int(seed),
++        run_id = run_id,
++        dataset_path = dataset_path,
++        warmup_steps = kwargs.pop('warmup_steps', 10),
++        # 32 tasks x 8 episodes = 256 per step, the batch size the onset and early-stop
++        # rules were calibrated on.
++        num_generations = kwargs.pop('num_generations', 8),
++        num_prompts = kwargs.pop('num_prompts', 32),
++        per_device_batch_size = kwargs.pop('per_device_batch_size', 8),
++        gpu_memory_utilization = kwargs.pop('gpu_memory_utilization', 0.6),
++        # Opening chat (rules + filesystem help) is under 1k tokens; the episode budget
++        # covers policy and environment tokens together.
++        max_prompt_length = kwargs.pop('max_prompt_length', 2048),
++        max_completion_length = kwargs.pop('max_completion_length', 4096),
++        max_steps = int(steps),
++        save_steps = kwargs.pop('save_steps', 5),
++        save_total_limit = kwargs.pop('save_total_limit', 1),
++        save_only_model = kwargs.pop('save_only_model', True),
++        **kwargs,
++    )
++
++    trainer = VerlGRPO(config)
++    trainer.run()
++    print(f"Training completed for {run_id}")
++
++
++def run_hvta(
++        hack_class: str,
++        model_id: str = DEFAULT_MODEL_ID,
++        steps: int = DEFAULT_STEPS,
++        seed: int = DEFAULT_SEED,
++        run_id: str | None = None,
++        dataset_path: str | None = None, # a parquet from hvta's build_dataset.py; default: build from the args below
++        games: str | None = None,         # comma-separated env ids; default HVTA_DEFAULT_GAMES[hack_class]
++        seeds: tuple[int, int] = (0, 512),
++        depth: tuple[int, int] = (1, 3),
++        max_fs_steps: int = 12,
++        prompt_name: str | None = None,        # sampling system prompt from SYSTEM_PROMPTS, prepended to hvta's own
++        target_prompt_name: str | None = None, # recontextualization target; None = no recontextualization
++        max_assistant_turns: int = 40,
++        max_completion_length: int = 4096,
++        label: str | None = None,
++    ):
++    """One hvta arm: standard training, a sampling prompt, or recontextualization."""
++    from hvta.rl import DEFAULT_SYSTEM_PROMPT
++
++    assert hack_class in HVTA_DEFAULT_GAMES, f"hack_class must be one of {list(HVTA_DEFAULT_GAMES)}"
++    steps, seed = int(steps), int(seed)
++    seeds, depth = tuple(int(x) for x in seeds), tuple(int(x) for x in depth)
++    if dataset_path is None:
++        dataset_path = build_hvta_dataset(hack_class, games, seeds, depth, int(max_fs_steps))
++
++    kwargs: dict = {}
++    intervention = None
++    if prompt_name is not None:
++        if prompt_name not in SYSTEM_PROMPTS:
++            raise ValueError(f"Prompt name {prompt_name} not found in SYSTEM_PROMPTS")
++        # The intervention text goes before hvta's neutral instruction so the action format
++        # survives; 'replace' swaps the dataset's whole system message for the combination.
++        kwargs['system_prompt'] = SYSTEM_PROMPTS[prompt_name] + "\n" + DEFAULT_SYSTEM_PROMPT
++        kwargs['system_prompt_method'] = 'replace'
++        intervention = prompt_name
++        if target_prompt_name is not None:
++            if target_prompt_name not in SYSTEM_PROMPTS:
++                raise ValueError(f"Prompt name {target_prompt_name} not found in SYSTEM_PROMPTS")
++            kwargs['recontextualize'] = True
++            kwargs['recontextualization_prompt'] = SYSTEM_PROMPTS[target_prompt_name] + "\n" + DEFAULT_SYSTEM_PROMPT
++            kwargs['recontextualization_prompt_method'] = 'replace'
++            intervention = f"rc-{prompt_name}-{target_prompt_name}"
++
++    run_name = "-".join([HVTA_ENV_NAME, hack_class.replace("_", ""), intervention or "baseline"] + ([label] if label else []))
++    main_run_hvta(
++        run_name=run_name,
++        dataset_path=dataset_path,
++        model_id=model_id,
++        steps=steps,
++        seed=seed,
++        run_id=run_id,
++        max_assistant_turns=int(max_assistant_turns),
++        max_completion_length=int(max_completion_length),
++        **kwargs,
++    )
++
++
++def run_hvta_hidden_solution(**kwargs):
++    """hvta, hidden-solution class: a leaked state file labelled as cheating."""
++    run_hvta(hack_class="hidden_solution", **kwargs)
++
++
++def run_hvta_logical_bug(**kwargs):
++    """hvta, logical-bug class: an exploitable flaw in the game source, readable by the agent."""
++    run_hvta(hack_class="logical_bug", **kwargs)
++
++
++if __name__ == "__main__":
+     fire.Fire({
++        'hvta_hidden_solution': run_hvta_hidden_solution,
++        'hvta_logical_bug': run_hvta_logical_bug,
+         'rl_baseline': run_rl_baseline,
+         'no_intervention': run_no_intervention,
+         'ground_truth': run_ground_truth_intervention,
+diff --git a/src/train/config.py b/src/train/config.py
+index b4dbe32..9d7bb7e 100644
+--- a/src/train/config.py
++++ b/src/train/config.py
+@@ -170,6 +170,14 @@ class GRPOConfig(TrainingConfig):
+     # evidence of convergence.
+     early_stop_min_wrong: int = 16
+ 
++    # Custom extension: a multi-turn agent-loop environment (hvta). When agent_loop is
++    # set, the rollout runs verl's async agent loop instead of the single-turn sync
++    # path; the loop scores each episode itself and the reward manager is bypassed.
++    # See src/train/verl/grpo.py:_configure_agent_loop and trainer.py:_agent_loop_reward.
++    agent_loop: str | None = None # registered agent loop name, e.g. 'hvta'
++    agent_loop_config_path: str | None = None # yaml naming the loop class (hvta/rl/verl_agent_loop.yaml)
++    max_assistant_turns: int | None = None # cap on policy turns per episode; None = the env's own step cap
++
+     optim: Literal["adamw_8bit", "adamw"] = "adamw_8bit"
+     learning_rate: float = 7e-5
+     lr_scheduler_type: Literal["linear", "cosine", "constant"] = "cosine" # Note: Linear not supported by verl
+diff --git a/src/train/verl/grpo.py b/src/train/verl/grpo.py
+index 8bd6243..678a09f 100644
+--- a/src/train/verl/grpo.py
++++ b/src/train/verl/grpo.py
+@@ -40,6 +40,11 @@ class VerlGRPO(TrainingService):
+         if not os.path.exists(self.training_config.dataset_path):
+             raise ValueError(f"Dataset not found at {self.training_config.dataset_path}")
+ 
++        # A dataset already in verl's row format (an hvta parquet) takes its own path.
++        if self.training_config.dataset_path.endswith('.parquet'):
++            self._load_prebuilt_parquet()
++            return
++
+         # Load the dataset: This has the keys of FineTuneInputValue
+         dataset: list[dict] = utils.read_jsonl_all(self.training_config.dataset_path)
+ 
+@@ -92,6 +97,73 @@ class VerlGRPO(TrainingService):
+         self.print(f"Saved dataset to {self.validation_dataset_path()}")
+     
+ 
++    def _load_prebuilt_parquet(self):
++        """Rows already in verl's format, from hvta's ``build_dataset.py``.
++
++        The sampling system prompt and the recontextualization target are applied to the
++        opening chat exactly as on the JSONL path; the target rides in
++        ``extra_info.rc_prompt`` for the same reason it does there.
++        """
++        import numpy as np
++        import pandas as pd
++
++        def to_py(value):
++            if isinstance(value, np.ndarray):
++                return [to_py(v) for v in value.tolist()]
++            if isinstance(value, dict):
++                return {k: to_py(v) for k, v in value.items()}
++            if isinstance(value, (list, tuple)):
++                return [to_py(v) for v in value]
++            if isinstance(value, np.generic):
++                return value.item()
++            return value
++
++        rows = [to_py(r) for r in pd.read_parquet(self.training_config.dataset_path).to_dict(orient='records')]
++        for row in rows:
++            prompt = row['prompt']
++            extra = row.get('extra_info') or {}
++            if self.training_config.recontextualize:
++                if self.training_config.recontextualization_prompt is None:
++                    extra['rc_prompt'] = copy.deepcopy(prompt)
++                else:
++                    extra['rc_prompt'] = add_system_prompt(
++                        prompt,
++                        self.training_config.recontextualization_prompt,
++                        method = self.training_config.recontextualization_prompt_method,
++                    )
++            if self.training_config.system_prompt is not None:
++                prompt = add_system_prompt(prompt, self.training_config.system_prompt, method = self.training_config.system_prompt_method)
++            row['prompt'] = prompt
++            row['extra_info'] = extra
++        if self.training_config.recontextualize:
++            self.print(f"Recontextualization target: {str(rows[0]['extra_info']['rc_prompt'])[:100]}...")
++        self.print(f"Example of dataset: {str(rows[0]['prompt'])[:100]}...")
++
++        dataset = Dataset.from_list(rows)
++        dataset.to_parquet(self.train_dataset_path())
++        self.print(f"Saved dataset ({len(dataset)} rows) to {self.train_dataset_path()}")
++        dataset.select(range(min(10, len(dataset)))).to_parquet(self.validation_dataset_path())
++
++    def _configure_agent_loop(self, cfg):
++        """Switch the rollout to verl's async agent loop for a multi-turn environment.
++
++        Set on the composed config rather than in the template so the training-parameter
++        patches, which edit the template's rollout block, keep applying cleanly. Every key
++        exists in verl's defaults, so struct mode is no obstacle.
++        """
++        rollout = cfg.actor_rollout_ref.rollout
++        rollout.mode = 'async'
++        rollout.multi_turn.enable = True
++        rollout.multi_turn.max_assistant_turns = self.training_config.max_assistant_turns
++        rollout.agent.default_agent_loop = self.training_config.agent_loop
++        rollout.agent.agent_loop_config_path = self.training_config.agent_loop_config_path
++        cfg.data.return_raw_chat = True
++        self.print(
++            f"Agent loop '{self.training_config.agent_loop}' from "
++            f"{self.training_config.agent_loop_config_path}; rollout mode async, "
++            f"max_assistant_turns={self.training_config.max_assistant_turns}"
++        )
++
+     def read_in_config(self, config_yaml: str):
+         """
+         Build the config the same way @hydra.main would, then optionally
+@@ -212,6 +284,8 @@ class VerlGRPO(TrainingService):
+         self.print(f"Created config at {self.verl_config_path()}")
+ 
+         config = self.read_in_config(self.verl_config_path())
++        if self.training_config.agent_loop:
++            self._configure_agent_loop(config)
+         utils.save_yaml(self.verl_full_config_path(), config)
+ 
+         return config
+diff --git a/src/train/verl/trainer.py b/src/train/verl/trainer.py
+index d2e04d2..0b4900d 100644
+--- a/src/train/verl/trainer.py
++++ b/src/train/verl/trainer.py
+@@ -661,7 +661,11 @@ class RHGRPORayTrainer(RayPPOTrainer):
+                             reward_tensor = self.rm_wg.compute_rm_score(batch)
+                             batch = batch.union(reward_tensor)
+ 
+-                        if self.config.reward_model.launch_reward_fn_async:
++                        if "rm_scores" in batch.batch.keys() and not self.use_rm:
++                            # Custom extension: an agent-loop environment scored its own
++                            # episodes and the reward manager never sees them.
++                            reward_tensor, reward_extra_infos_dict = self._agent_loop_reward(batch)
++                        elif self.config.reward_model.launch_reward_fn_async:
+                             future_reward = compute_reward_async.remote(
+                                 data=batch, config=self.config, tokenizer=self.tokenizer
+                             )
+@@ -898,6 +902,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
+                 # The reward functions' own counters, merged here rather than sent to wandb
+                 # from inside the reward function. Last, so nothing above can shadow them.
+                 metrics.update(self._drain_reward_metrics(self.reward_fn))
++                metrics.update(self._agent_loop_metrics(batch))
+ 
+                 # TODO: make a canonical logger that supports various backend
+                 logger.log(data=metrics, step=self.global_steps)
+@@ -925,6 +930,39 @@ class RHGRPORayTrainer(RayPPOTrainer):
+                     self.train_dataset.on_batch_end(batch=batch)
+ 
+ 
++    def _agent_loop_reward(self, batch: DataProto):
++        """Reward and per-sample columns from an agent-loop environment (hvta).
++
++        The loop set ``reward_score`` per episode, which verl placed at the last response
++        token of ``rm_scores``; that tensor is the reward. The episode record arrived as
++        ``hvta_*`` columns of ``non_tensor_batch`` (hvta.rl.metrics.record_to_columns).
++        Three aliases let the early stop read the batch unchanged:
++        ``response_test_func_arbitrary_pass`` and ``eq_hinted`` <- hack_triggered,
++        ``eq_correct`` <- honest_win, so its lambda is P(hack | not an honest win).
++        ``response`` is decoded here because the modified advantage estimator expects
++        that column from the reward manager.
++        """
++        nt = batch.non_tensor_batch
++        infos = {k: np.asarray(nt[k]).tolist() for k in nt.keys() if k.startswith("hvta_")}
++        if "hvta_hack_triggered" in nt:
++            hack = np.asarray(nt["hvta_hack_triggered"], dtype=float).tolist()
++            infos["response_test_func_arbitrary_pass"] = hack
++            infos["eq_hinted"] = hack
++            infos["eq_correct"] = np.asarray(nt["hvta_honest_win"], dtype=float).tolist()
++        infos["response"] = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
++        return batch.batch["rm_scores"], infos
++
++    def _agent_loop_metrics(self, batch: DataProto) -> dict:
++        """Per-batch counts from the ``hvta_*`` columns: ``detail/hvta/n_hack`` and friends,
++        plus one block per game. Same definitions as hvta's calibration table."""
++        nt = batch.non_tensor_batch
++        cols = {k: np.asarray(nt[k]).tolist() for k in nt.keys() if k.startswith("hvta_")}
++        if not cols:
++            return {}
++        from hvta.rl.metrics import aggregate_columns
++
++        return aggregate_columns(cols, prefix="detail/hvta")
++
+     def _drain_reward_metrics(self, reward_fn) -> dict:
+         """Metrics the reward functions buffered this batch, or {} for a manager without them.
+ 
+@@ -1004,7 +1042,9 @@ class RHGRPOTaskRunner(TaskRunner):
+         from verl.single_controller.ray import RayWorkerGroup
+ 
+         assert config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}, "Only FSDP and FSDP2 are supported"
+-        assert config.actor_rollout_ref.rollout.mode == "sync", "Only sync rollout mode is supported"
++        # Sync is the single-turn path; async is verl's agent loop, used by multi-turn
++        # environments (hvta). Both worker classes below exist for exactly this switch.
++        assert config.actor_rollout_ref.rollout.mode in ("sync", "async"), "rollout mode must be sync or async"
+ 
+         if config.actor_rollout_ref.rollout.mode == "sync":
+             warnings.warn("spmd rollout mode is deprecated and will be removed in v0.6.2", stacklevel=2)
+diff --git a/verl/verl/workers/rollout/vllm_rollout/vllm_async_server.py b/verl/verl/workers/rollout/vllm_rollout/vllm_async_server.py
+index 287c8dc..92c3b80 100644
+--- a/verl/verl/workers/rollout/vllm_rollout/vllm_async_server.py
++++ b/verl/verl/workers/rollout/vllm_rollout/vllm_async_server.py
+@@ -380,6 +380,10 @@ class vLLMHttpServerBase:
+         """Generate sequence with token-in-token-out."""
+         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
+         max_tokens = self.config.max_model_len - len(prompt_ids)
++        # An agent loop may cap one turn below the remaining context (hvta does).
++        requested = sampling_params.pop("max_tokens", None)
++        if requested is not None:
++            max_tokens = min(max_tokens, int(requested))
+         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
+         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)

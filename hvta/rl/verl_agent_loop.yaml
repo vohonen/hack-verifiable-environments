@@ -1,0 +1,5 @@
+# Agent-loop registry entries for verl (actor_rollout_ref.rollout.agent.agent_loop_config_path).
+# Extra keys are passed to HVTAAgentLoop.init_class as kwargs.
+- name: hvta
+  _target_: hvta.rl.verl_agent_loop.HVTAAgentLoop
+  max_tokens_per_turn: 256
