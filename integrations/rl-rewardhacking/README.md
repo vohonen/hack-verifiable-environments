@@ -37,24 +37,17 @@ moving.
 
 ## Using it from rl-exploration
 
-The wiring landed in rl-exploration at `bfdcddd`: `patches/hvta-agent-loop.patch` (an identical
-copy of the one here), the arms' default labels and `hvta-<label>-s<seed>-<stamp>` run ids, and the
-patch's place in `PATCH_ORDER` and `PATCH_DEPENDS_ON` (the six chain patches it needs, so
-`--patch hvta-agent-loop.patch` alone resolves to a chain that applies).
+The wiring is in rl-exploration: `bfdcddd` added `patches/hvta-agent-loop.patch` (an identical
+copy of the one here), the arms' default labels and `hvta-<label>-s<seed>-<stamp>` run ids, and
+the patch's place in `PATCH_ORDER` and `PATCH_DEPENDS_ON` (the six chain patches it needs, so
+`--patch hvta-agent-loop.patch` alone resolves to a chain that applies); `37529ad` added the
+job-start install (`tools/rlrh_job.sh`, `HVTA_COMMIT` and `--hvta-commit` in `tools/rlrh_job.py`).
+Nothing is pending. When a change here needs one there, it ships as `rl-exploration-wiring.patch`
+in this directory, generated against rl-exploration's `main`: apply it in that checkout, commit,
+delete it here. If such a patch stops applying, the chain moved again and the trainer patch needs
+re-checking against it too (`tools/rlrh_job.py`'s dry run does exactly that).
 
-`rl-exploration-wiring.patch`, when present here, is what rl-exploration's `main` still lacks,
-generated against that `main`. Apply it in the checkout, commit, and delete the file here:
-
-```bash
-git apply --whitespace=nowarn integrations/rl-rewardhacking/rl-exploration-wiring.patch
-```
-
-The current one moves the hvta install from the image to job start: `tools/rlrh_job.sh` installs
-the package at the job's sha, `tools/rlrh_job.py` carries the sha (`HVTA_COMMIT`, `--hvta-commit`),
-and the Dockerfile layer is gone. If it stops applying, the chain moved again and the trainer patch
-needs re-checking against it too (`tools/rlrh_job.py`'s dry run does exactly that).
-
-Then submit as any other arm. The smoke run first, then the real one:
+Submit as any other arm. The smoke run first, then the real one:
 
 ```bash
 # 5 steps, no checkpoint eval: proves the async rollout path, the reward plumbing and the

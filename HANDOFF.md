@@ -1,6 +1,6 @@
 # Handoff
 
-For a session continuing this work. Current state as of 2026-09-14; `STATUS.md` is the short
+For a session continuing this work. Current state as of 2026-09-15; `STATUS.md` is the short
 version. Files are named so you can go and read them; this doc does not repeat their content.
 
 ## Purpose and shape
@@ -27,7 +27,7 @@ version. Files are named so you can go and read them; this doc does not repeat t
 | Rollout driver | `hvta/rl/rollout.py` | Async OpenAI-compatible driver for calibration; resumable JSONL; enforces `max_episode_tokens`; `ContextLengthExceeded` -> budget truncation. |
 | verl agent loop | `hvta/rl/verl_agent_loop.py`, `verl_agent_loop.yaml` | `HVTALoopCore` is testable without verl; `HVTAAgentLoop` registers as `hvta` when verl imports. Reads `HVTA_MAX_TOKENS_PER_TURN` (default 256). |
 | Filesystem and detection | `hvta/FilesystemWrapper/` | `virtual_fs.py` (`FsLayout`, decoys, hack placement), `filesystem_wrapper.py` (step caps, invalid counting, detection by content), `logical_bug_envs/` (five planted bugs). |
-| Trainer patches | `integrations/rl-rewardhacking/` | `hvta-agent-loop.patch` (trainer), `rl-exploration-wiring.patch` (job tool, Dockerfile, copies the first), README with the table of changes. |
+| Trainer patches | `integrations/rl-rewardhacking/` | `hvta-agent-loop.patch` (trainer; identical copy in rl-exploration's `patches/`), `rl-exploration-wiring.patch` (what rl-exploration's `main` still lacks, only while something is pending), README with the table of changes and how the pod gets the package. |
 | Scripts | `scripts/` | `serve_ow.py`, `calibrate.py`, `build_dataset.py`. |
 | Calibration | `experiments/001-calibration/` | README (method, tables, conclusions), gzipped JSONLs with transcripts, `make_tables.py`. |
 | Tests | `tests/` | 80, ~15 s: `.venv/bin/python -m pytest tests/ -q`. `test_verl_agent_loop.py` covers the loop core with a fake generator. |
@@ -58,16 +58,20 @@ version. Files are named so you can go and read them; this doc does not repeat t
 - Chain position: after `rh-entrypoint-kwargs`, before the `rh-jan2026-params*` patches.
   `PATCH_DEPENDS_ON` lists six chain patches under it (anti-hack, RC, runtime-prompts,
   reward-metric-step, early-stop, entrypoint-kwargs); it does not need
-  `rh-unparse-recursion-guard`. Generated against rl-exploration `main` at `7f63d36`.
+  `rh-unparse-recursion-guard`. Landed in rl-exploration at `bfdcddd`; the job-start install
+  of the package at `37529ad`.
 - Run ids from the queue are `hvta-<label>-s<seed>-<stamp>` (default labels `hs-baseline`,
   `lb-baseline`); HF repos `rlrh-hvta-...`. The pod-side runner still builds the LeetCode
   datasets and runs the LeetCode checkpoint eval unless `--skip-eval`; on an hvta run that
   eval is a transfer measurement (~8 min), harmless.
-- Image: `docker/Dockerfile` in rl-exploration gets one layer installing
-  `hack-verifiable-environments[rl]` at `HVTA_COMMIT` plus TextArena at hvta's pinned commit
-  and the two NLTK corpora. Pin is `08e0989` (the calibration commit; the package has not
-  changed since). Bump it, and rebuild, whenever `hvta/` changes. The build log's hvta layer
-  ends with `hvta ok`.
+- The package on the pod: not baked. rl-exploration's `tools/rlrh_job.sh` installs
+  `hack-verifiable-environments[rl]` and TextArena into the venv at job start, at the sha the
+  job carries (`HVTA_COMMIT` in `tools/rlrh_job.py`, `--hvta-commit` to override), fetches the
+  two NLTK corpora, and dies if a shared package (torch, vllm, transformers, ray, numpy)
+  changed version. Pin is `08e0989` (the calibration commit; `hvta/` has not changed since).
+  Bump it whenever `hvta/` changes, and push first: the pod clones by sha. The runner logs
+  `hvta ok`. Bake it into `docker/Dockerfile` once the loop is stable; the image workflow
+  builds from scratch with about 3 GB of disk to spare, so that layer must stay small.
 
 ## Verifying the chain without a pod
 
@@ -85,7 +89,7 @@ git apply --check --whitespace=nowarn ~/projects/rl-exploration/patches/rh-jan20
 
 # the submitter's own dry run (patch chain + --extra gate) against a scratch clone of rl-exploration
 git clone -q ~/projects/rl-exploration $TMPDIR/rlx && cd $TMPDIR/rlx
-git apply --whitespace=nowarn <hvta>/integrations/rl-rewardhacking/rl-exploration-wiring.patch
+git apply --whitespace=nowarn <hvta>/integrations/rl-rewardhacking/rl-exploration-wiring.patch   # only while one is pending
 set -a; . ~/projects/rl-exploration/.env; set +a
 "$(uv tool dir)/openweights/bin/python" tools/rlrh_job.py submit --arm hvta_hidden_solution --seed 1 --steps 5 \
     --patch hvta-agent-loop.patch --early-stop 0.90 --skip-eval --dry-run
@@ -131,7 +135,11 @@ trainer patch against the new chain before regenerating it.
 
 - The sandbox can write only under `~/projects/rl-envs` and `$TMPDIR`; `rl-exploration` is
   read-only from here and `git push` needs SSH, which the sandbox cannot do. Patches are
-  produced here; Vili applies, commits, pushes and triggers `build-gpu-image.yml` by hand.
+  produced here; Vili applies, commits and pushes. `gh` is also blocked (its config dir is
+  denied), so Actions logs come through Vili.
+- Anything a pod or an image build fetches by sha must be on GitHub first. The one image build
+  that carried an hvta layer (2026-09-14) died on exactly this: it pinned `08e0989` while
+  `origin/rl-env` was still at `602151b`. Check `git status -sb` for "ahead" before pinning.
 - Background jobs: only processes started in the current Bash call can be signalled; use
   `run_in_background` and `TaskStop`. zsh does not word-split `$VAR` used as a command (use
   a function); its `nice(5) failed` warnings on `&` jobs are harmless.
@@ -153,16 +161,15 @@ trainer patch against the new chain before regenerating it.
 
 ## Next steps
 
-1. Vili: push `rl-env`; apply the wiring patch in rl-exploration; commit; push; build the
-   image; set `DEFAULT_IMAGE` or pass `--image`.
-2. Smoke run (5 steps, `--skip-eval`; command in the integration README). Watch: workers
-   import `hvta`; `detail/hvta/*` panels appear from step 1; no assert from
-   `_recontextualize_batch` (only if an RC arm is run); episode lengths vs
+1. Smoke run (5 steps, `--skip-eval`; command in the integration README). Watch: the runner's
+   `hvta ok` line, then workers import `hvta`; `detail/hvta/*` panels appear from step 1; no
+   assert from `_recontextualize_batch` (only if an RC arm is run); episode lengths vs
    `max_completion_length` 4096 (`n_budget_truncated` should be near zero for these games:
    calibration saw 0-1 % over budget). Logs: `https://<pod_id>-10101.proxy.runpod.net/`.
-3. If the loop needs fixing, changes land in `hvta/rl/verl_agent_loop.py` (pin bump +
-   rebuild) or in the trainer patch (no rebuild; patches are mounted per job).
-4. Then 200 steps, one seed; then 3 seeds, read with `rl-exploration`'s onset and hazard
+2. If the loop needs fixing, changes land in `hvta/rl/verl_agent_loop.py` (push, then
+   `--hvta-commit <sha>` or a bump of `HVTA_COMMIT`) or in the trainer patch (regenerate it,
+   copy to rl-exploration's `patches/`; patches are mounted per job). Neither needs an image.
+3. Then 200 steps, one seed; then 3 seeds, read with `rl-exploration`'s onset and hazard
    tools. Honest-pass axis: `n_honest_win` on a pinned held-out seed set (not built yet:
    `scripts/build_dataset.py --seeds 512 640 ...` would make one).
 5. Optional calibration: `--max-fs-steps 6` and `8` on the four games at depth 3, to see

@@ -1,6 +1,6 @@
 # Status
 
-Last updated 2026-09-14. Plain-language summary; the detail for continuing is in `HANDOFF.md`.
+Last updated 2026-09-15. Plain-language summary; the detail for continuing is in `HANDOFF.md`.
 
 ## What this is
 
@@ -9,20 +9,22 @@ Last updated 2026-09-14. Plain-language summary; the detail for continuing is in
 - We train a small model (Qwen3-4B) on these games with RL and watch whether it learns to
   read the answer instead of playing. Every episode records whether it cheated and when.
 - The training itself runs in the separate project `~/projects/rl-exploration`. This repo
-  provides the environment and two patches that plug it into that project's trainer.
+  provides the environment and the patch that plugs it into that project's trainer.
 
 ## Where things are
 
 - `hvta/rl/`: the environment as a multi-turn chat, plus the piece the trainer calls.
 - `scripts/`: serve a model on a rented GPU, measure how often it cheats, build the training data.
-- `integrations/rl-rewardhacking/`: the two trainer patches and how to use them.
+- `integrations/rl-rewardhacking/`: the trainer patch, how it is wired into `rl-exploration`,
+  and how the environment reaches the training pods.
 - `experiments/001-calibration/`: how often the untrained model cheats and wins, per game.
 
 ## Done
 
 - Environment and RL layer work; 80 tests pass.
-- Trainer patches are written and checked against the current `rl-exploration` (its own
-  dry run accepts them).
+- Trainer patch written and committed in `rl-exploration`. The environment is installed on
+  the pod when a job starts, pinned to a commit of this repo, so fixing it needs no image
+  rebuild (the one attempt at baking it failed because the pinned commit was not pushed).
 - Measured the untrained model on every candidate game (3712 episodes, about $2.40).
 - Fixed two bugs the measurement exposed: short games could not be finished after browsing
   the filesystem, and the measurement script did not enforce the trainer's length limit.
@@ -41,14 +43,12 @@ Last updated 2026-09-14. Plain-language summary; the detail for continuing is in
 
 ## Next steps
 
-1. Vili: push this branch; in `rl-exploration`, apply `integrations/rl-rewardhacking/rl-exploration-wiring.patch`,
-   commit, push, and build the GPU image (manual GitHub action). Commands are in
-   `integrations/rl-rewardhacking/README.md`.
-2. Smoke run: 5 training steps through the job queue, no evaluation. This is the first time
-   the trainer's multi-turn path runs at all; expect to debug it.
-3. If the smoke run works: one 200-step run, then 3 seeds, read with the usual onset and
+1. Smoke run: 5 training steps through the job queue, no evaluation. The command is in
+   `integrations/rl-rewardhacking/README.md`. This is the first time the trainer's multi-turn
+   path runs at all; expect to debug it.
+2. If the smoke run works: one 200-step run, then 3 seeds, read with the usual onset and
    hazard tools in `rl-exploration`.
-4. Optional before 3: re-measure the four games with 6 or 8 filesystem commands per episode
+3. Optional before 2: re-measure the four games with 6 or 8 filesystem commands per episode
    (15 minutes, about $1) if a lower starting cheat rate is wanted.
 
 ## Open questions
