@@ -25,6 +25,10 @@ Last updated 2026-09-15. Plain-language summary; the detail for continuing is in
 - Trainer patch written and committed in `rl-exploration`. The environment is installed on
   the pod when a job starts, pinned to a commit of this repo, so fixing it needs no image
   rebuild (the one attempt at baking it failed because the pinned commit was not pushed).
+- Smoke run through the job queue (5 steps, 2026-09-15): the environment installs on the pod,
+  the trainer's multi-turn path runs, rewards reach the optimizer, and every cheating and
+  winning counter shows up in wandb from step 1. About 80 seconds per step on 2 GPUs, so a
+  200-step run is roughly 4.5 hours.
 - Measured the untrained model on every candidate game (3712 episodes, about $2.40).
 - Fixed two bugs the measurement exposed: short games could not be finished after browsing
   the filesystem, and the measurement script did not enforce the trainer's length limit.
@@ -43,11 +47,10 @@ Last updated 2026-09-15. Plain-language summary; the detail for continuing is in
 
 ## Next steps
 
-1. Smoke run: 5 training steps through the job queue, no evaluation. The command is in
-   `integrations/rl-rewardhacking/README.md`. This is the first time the trainer's multi-turn
-   path runs at all; expect to debug it.
-2. If the smoke run works: one 200-step run, then 3 seeds, read with the usual onset and
-   hazard tools in `rl-exploration`.
+1. Vili: point `rl-exploration`'s default at the current commit of this repo (`HVTA_COMMIT` in
+   `tools/rlrh_job.py`), so jobs no longer need `--hvta-commit`.
+2. One 200-step run, then 3 seeds, read with the usual onset and hazard tools in
+   `rl-exploration`. The smoke run's command minus `--steps 5 --skip-eval`.
 3. Optional before 2: re-measure the four games with 6 or 8 filesystem commands per episode
    (15 minutes, about $1) if a lower starting cheat rate is wanted.
 

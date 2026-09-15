@@ -137,6 +137,18 @@ trainer patch against the new chain before regenerating it.
   read-only from here and `git push` needs SSH, which the sandbox cannot do. Patches are
   produced here; Vili applies, commits and pushes. `gh` is also blocked (its config dir is
   denied), so Actions logs come through Vili.
+- Smoke run 2026-09-15 (5 steps, wandb `do9xomaw` in `rl-rewardhacking-repro`, HF
+  `longtermrisk/rlrh-hvta-hs-baseline-s1-20260915_072735`): everything in the chain works.
+  Per step about 80 s (50 s generation), 256 episodes, response length mean ~800 tokens, max
+  ~3300, `n_budget_truncated` 0. Two things in the log to know about: (a) verl's
+  `RewardManagerWorker` dies at creation with `Unknown reward loop manager: batch_activations`
+  because the async path looks the name up in a different registry; harmless, the loop sets
+  `reward_score` so it is never called, but to silence it set `reward_model.reward_manager` to
+  `naive` in `_configure_agent_loop`. (b) `actor/zero_advantages` reads 256 and
+  `frac_adv_zero` 1.0: rl-rewardhacking's metric looks at the advantage at the last padded
+  position, which is always 0 for multi-turn output; `critic/advantages/*` is the real one
+  (spread about ±2.5). Rewards are TextArena's, which give partial credit (Mastermind mean
+  ~0.5 with almost no wins), so groups have variance even without a win.
 - `uv pip install` from git builds a wheel. With no `[build-system]` uv treats the project as
   virtual locally (never installed; the repo root on `sys.path` is what made tests pass), and on
   the pod setuptools' auto-discovery saw the fork's extra top-level dirs and refused (smoke run
@@ -166,15 +178,12 @@ trainer patch against the new chain before regenerating it.
 
 ## Next steps
 
-1. Smoke run (5 steps, `--skip-eval`; command in the integration README). Watch: the runner's
-   `hvta ok` line, then workers import `hvta`; `detail/hvta/*` panels appear from step 1; no
-   assert from `_recontextualize_batch` (only if an RC arm is run); episode lengths vs
-   `max_completion_length` 4096 (`n_budget_truncated` should be near zero for these games:
-   calibration saw 0-1 % over budget). Logs: `https://<pod_id>-10101.proxy.runpod.net/`.
+1. Vili: bump `HVTA_COMMIT` in rl-exploration's `tools/rlrh_job.py` to this repo's current
+   commit (the smoke run used `--hvta-commit b7bb2b8`, which is that commit).
 2. If the loop needs fixing, changes land in `hvta/rl/verl_agent_loop.py` (push, then
    `--hvta-commit <sha>` or a bump of `HVTA_COMMIT`) or in the trainer patch (regenerate it,
    copy to rl-exploration's `patches/`; patches are mounted per job). Neither needs an image.
-3. Then 200 steps, one seed; then 3 seeds, read with `rl-exploration`'s onset and hazard
+3. 200 steps, one seed; then 3 seeds, read with `rl-exploration`'s onset and hazard
    tools. Honest-pass axis: `n_honest_win` on a pinned held-out seed set (not built yet:
    `scripts/build_dataset.py --seeds 512 640 ...` would make one).
 5. Optional calibration: `--max-fs-steps 6` and `8` on the four games at depth 3, to see
