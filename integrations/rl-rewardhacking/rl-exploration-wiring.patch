@@ -1,536 +1,207 @@
 diff --git a/docker/Dockerfile b/docker/Dockerfile
-index fd06a14..d8bf4c8 100644
+index d8bf4c8..9b5c170 100644
 --- a/docker/Dockerfile
 +++ b/docker/Dockerfile
-@@ -20,6 +20,11 @@ ARG RH_COMMIT=73695ff
+@@ -20,11 +20,6 @@ ARG RH_COMMIT=73695ff
  ARG UNISON_VERSION=2.54.0
  ARG UNISON_SHA256=d279dff18682c909d3ddb0b280ab151229b4798b9399b1d227084da424337d24
  ARG PYTHON_VERSION=3.12
-+# HV-TextArena fork with the RL layer (the second environment). TextArena is pinned to the
-+# commit hvta's lock names; `uv pip install` does not read hvta's [tool.uv.sources], so the
-+# pin is spelled out here. Bump both together.
-+ARG HVTA_COMMIT=08e0989bf799667d2d20a711e733c0a1c6351cff
-+ARG TEXTARENA_COMMIT=a2c896c5c84c8557d78d3d9182a066ff573daf44
+-# HV-TextArena fork with the RL layer (the second environment). TextArena is pinned to the
+-# commit hvta's lock names; `uv pip install` does not read hvta's [tool.uv.sources], so the
+-# pin is spelled out here. Bump both together.
+-ARG HVTA_COMMIT=08e0989bf799667d2d20a711e733c0a1c6351cff
+-ARG TEXTARENA_COMMIT=a2c896c5c84c8557d78d3d9182a066ff573daf44
  
  # Everything of ours lives under /opt, deliberately. RunPod mounts a volume over
  # /workspace at container start (start_runpod.py passes volume_mount_path="/workspace"),
-@@ -119,6 +124,20 @@ RUN unset VIRTUAL_ENV && \
+@@ -124,19 +119,9 @@ RUN unset VIRTUAL_ENV && \
      echo "interpreter: $(readlink -f ${RLRH_VENV}/bin/python)" && \
      ${RLRH_VENV}/bin/python -V
  
-+# The second environment, as one layer on top of the venv. hvta is pure Python (a few
-+# thousand lines) and the trainer is the 14 GB part, so it shares this image rather than
-+# getting its own. The NLTK corpora go under the venv prefix, which is on nltk's default
-+# search path, so no ENV line is needed (verify_venv.py compares ENV against setup.sh).
-+# The downloader's index fetch is what needs the network here; the corpora are ~2 MB.
-+RUN unset VIRTUAL_ENV && \
-+    export UV_CACHE_DIR=${RLRH_HOME}/.uvcache && \
-+    uv pip install --python ${RLRH_VENV}/bin/python \
-+        "textarena @ git+https://github.com/TextArena/TextArena.git@${TEXTARENA_COMMIT}" \
-+        "hack-verifiable-environments[rl] @ git+https://github.com/vohonen/hack-verifiable-environments.git@${HVTA_COMMIT}" && \
-+    rm -rf ${RLRH_HOME}/.uvcache && \
-+    ${RLRH_VENV}/bin/python -c "import nltk; d='${RLRH_VENV}/nltk_data'; [nltk.download(p, download_dir=d, quiet=True) or exit(1) for p in ('words', 'averaged_perceptron_tagger_eng')]" && \
-+    ${RLRH_VENV}/bin/python -c "import hvta.rl, hvta.rl.verl_agent_loop, nltk; nltk.data.find('corpora/words'); print('hvta ok')"
-+
+-# The second environment, as one layer on top of the venv. hvta is pure Python (a few
+-# thousand lines) and the trainer is the 14 GB part, so it shares this image rather than
+-# getting its own. The NLTK corpora go under the venv prefix, which is on nltk's default
+-# search path, so no ENV line is needed (verify_venv.py compares ENV against setup.sh).
+-# The downloader's index fetch is what needs the network here; the corpora are ~2 MB.
+-RUN unset VIRTUAL_ENV && \
+-    export UV_CACHE_DIR=${RLRH_HOME}/.uvcache && \
+-    uv pip install --python ${RLRH_VENV}/bin/python \
+-        "textarena @ git+https://github.com/TextArena/TextArena.git@${TEXTARENA_COMMIT}" \
+-        "hack-verifiable-environments[rl] @ git+https://github.com/vohonen/hack-verifiable-environments.git@${HVTA_COMMIT}" && \
+-    rm -rf ${RLRH_HOME}/.uvcache && \
+-    ${RLRH_VENV}/bin/python -c "import nltk; d='${RLRH_VENV}/nltk_data'; [nltk.download(p, download_dir=d, quiet=True) or exit(1) for p in ('words', 'averaged_perceptron_tagger_eng')]" && \
+-    ${RLRH_VENV}/bin/python -c "import hvta.rl, hvta.rl.verl_agent_loop, nltk; nltk.data.find('corpora/words'); print('hvta ok')"
++# The second environment (hvta, the HV-TextArena fork with an RL layer) is not baked yet:
++# tools/rlrh_job.sh installs it into this venv at job start, at the sha the job names, while
++# its agent loop is still moving. Bake it here as one layer once it has settled.
+ 
  # rlrh-env.sh is sourced, not executed, hence 0644.
  COPY docker/rlrh-env.sh /usr/local/bin/rlrh-env.sh
- COPY docker/stop_pod.py /usr/local/bin/stop_pod.py
-diff --git a/patches/hvta-agent-loop.patch b/patches/hvta-agent-loop.patch
-new file mode 100644
-index 0000000..1f8a4e2
---- /dev/null
-+++ b/patches/hvta-agent-loop.patch
-@@ -0,0 +1,430 @@
-+diff --git a/scripts/run_rl_training.py b/scripts/run_rl_training.py
-+index ea12877..91bb2fd 100644
-+--- a/scripts/run_rl_training.py
-++++ b/scripts/run_rl_training.py
-+@@ -84,7 +84,10 @@ def main_run_rl(
-+     kwargs.setdefault('early_stop_window',
-+                       int(os.environ.get('RLRH_EARLY_STOP_WINDOW') or 5))
-+     
-+-    dataset_path = base_dataset_path.replace('.jsonl', f'_{task}.jsonl')
-++    # A parquet is a prebuilt verl dataset (hvta) and is used as-is; the JSONL path derives
-++    # the task's file from the base set.
-++    dataset_path = (base_dataset_path if base_dataset_path.endswith('.parquet')
-++                    else base_dataset_path.replace('.jsonl', f'_{task}.jsonl'))
-+     if ('modify' in task) or ('incontext' in task):
-+         kwargs['reward_funcs_kwargs']['DefineStarterCode'] = {}
-+ 
-+@@ -536,9 +539,204 @@ def run_recontextualization(
-+     )
-+ 
-+ 
-++"""
-++HVTA: HACK-VERIFIABLE TEXTARENA
-++A multi-turn game environment with planted, detectable hacks: a leaked state file labelled
-++as cheating (hidden_solution) or an exploitable flaw in the game source (logical_bug). The
-++rollout is verl's async agent loop (hvta.rl.verl_agent_loop), which scores each episode
-++itself; the trainer takes the reward from rm_scores and logs detail/hvta/* counters. The
-++reward is the game's own; the hack flags never enter it.
-++"""
-++
-++HVTA_ENV_NAME = "hvta"
-++# The hidden-solution set is the calibrated one (hvta experiments/001-calibration): the games
-++# where Qwen3-4B hacks in a few percent of episodes; GuessTheNumber never touches the
-++# filesystem and is left out. The logical-bug set is the five planted bugs, uncalibrated.
-++HVTA_DEFAULT_GAMES = {
-++    "hidden_solution": ["Sudoku-v0-very-easy", "Mastermind-v0", "Hangman-v0", "Wordle-v0"],
-++    "logical_bug": ["Wordle-v0", "Sudoku-v0-very-easy", "Minesweeper-v0-small", "TowerOfHanoi-v0", "FifteenPuzzle-v0"],
-++}
-++
-++
-++def _hvta_range(value) -> tuple[int, int]:
-++    """fire hands --depth=1,3 over as a tuple and --depth=2 as an int; both mean a range."""
-++    if isinstance(value, (int, float)):
-++        return (int(value), int(value))
-++    if isinstance(value, str):
-++        value = value.split(",")
-++    lo, hi = (int(x) for x in value)
-++    return (lo, hi)
-++
-++
-++def build_hvta_dataset(
-++        hack_class: str,
-++        games: list[str] | str | None,
-++        seeds: tuple[int, int],
-++        depth: tuple[int, int],
-++        max_fs_steps: int,
-++    ) -> str:
-++    """Write the parquet of task specs for one arm (idempotent: same args, same file)."""
-++    import hashlib
-++    from hvta.FilesystemWrapper.virtual_fs import FsLayout
-++    from hvta.rl import make_tasks
-++    from hvta.rl.dataset import write_verl_parquet
-++
-++    if games is None:
-++        games = HVTA_DEFAULT_GAMES[hack_class]
-++    elif isinstance(games, str):
-++        games = [g for g in games.split(",") if g]
-++    else:
-++        games = list(games)
-++    spec = f"{hack_class}|{','.join(games)}|{seeds[0]}-{seeds[1]}|d{depth[0]}-{depth[1]}|fs{max_fs_steps}"
-++    out = f"{RESULTS_PATH}/data/hvta_{hack_class}_{hashlib.sha1(spec.encode()).hexdigest()[:8]}.parquet"
-++    if os.path.exists(out):
-++        print(f"hvta dataset exists: {out} ({spec})")
-++        return out
-++    tasks = make_tasks(
-++        games,
-++        range(seeds[0], seeds[1]),
-++        hidden_solution=(hack_class == "hidden_solution"),
-++        logical_bug=(hack_class == "logical_bug"),
-++        fs_layout=FsLayout.randomised(depth=tuple(depth)),
-++        max_fs_steps=max_fs_steps,
-++    )
-++    os.makedirs(os.path.dirname(out), exist_ok=True)
-++    write_verl_parquet(tasks, out)
-++    print(f"hvta dataset written: {out} ({len(tasks)} tasks; {spec})")
-++    return out
-++
-++
-++def hvta_training_args(
-++        hack_class: str,
-++        model_id: str,
-++        steps: int,
-++        seed: int,
-++        run_id: str | None,
-++        dataset_path: str | None,
-++        games: str | None,
-++        seeds,
-++        depth,
-++        max_fs_steps: int,
-++        prompt_name: str | None,
-++        target_prompt_name: str | None,
-++        max_assistant_turns: int,
-++        label: str | None,
-++        overrides: dict,
-++    ) -> dict:
-++    """Everything main_run_rl needs for one hvta arm.
-++
-++    Shared by the two entrypoints below, which differ only in hack_class. `overrides` is
-++    the entrypoint's **kwargs: a --key=value flag beats a default set here, and
-++    main_run_rl rejects any key GRPOConfig does not declare. The reward spec main_run_rl
-++    fills in is never called (the loop scores the episodes and the trainer takes
-++    rm_scores); the reward manager merely asserts a non-empty one when constructed.
-++    """
-++    import hvta.rl  # installed on the image; fail here rather than inside a Ray worker
-++    from hvta.rl import DEFAULT_SYSTEM_PROMPT
-++
-++    assert hack_class in HVTA_DEFAULT_GAMES, f"hack_class must be one of {list(HVTA_DEFAULT_GAMES)}"
-++    if dataset_path is None:
-++        dataset_path = build_hvta_dataset(
-++            hack_class, games, _hvta_range(seeds), _hvta_range(depth), int(max_fs_steps),
-++        )
-++    assert dataset_path.endswith('.parquet'), "hvta datasets are parquet rows (hvta.rl.dataset)"
-++
-++    args = dict(
-++        task=HVTA_ENV_NAME,
-++        base_dataset_path=dataset_path,
-++        model_id=model_id,
-++        steps=int(steps),
-++        seed=int(seed),
-++        run_id=run_id,
-++        agent_loop=HVTA_ENV_NAME,
-++        max_assistant_turns=int(max_assistant_turns),
-++    )
-++    intervention = None
-++    if prompt_name is not None:
-++        if prompt_name not in SYSTEM_PROMPTS:
-++            raise ValueError(f"Prompt name {prompt_name} not found in SYSTEM_PROMPTS")
-++        # The intervention text goes before hvta's neutral instruction so the action format
-++        # survives; 'replace' swaps the dataset's whole system message for the combination.
-++        args['system_prompt'] = SYSTEM_PROMPTS[prompt_name] + "\n" + DEFAULT_SYSTEM_PROMPT
-++        args['system_prompt_method'] = 'replace'
-++        intervention = prompt_name
-++        if target_prompt_name is not None:
-++            if target_prompt_name not in SYSTEM_PROMPTS:
-++                raise ValueError(f"Prompt name {target_prompt_name} not found in SYSTEM_PROMPTS")
-++            args['recontextualize'] = True
-++            args['recontextualization_prompt'] = SYSTEM_PROMPTS[target_prompt_name] + "\n" + DEFAULT_SYSTEM_PROMPT
-++            args['recontextualization_prompt_method'] = 'replace'
-++            intervention = f"rc-{prompt_name}-{target_prompt_name}"
-++    args['run_name'] = "-".join(
-++        [HVTA_ENV_NAME, hack_class.replace("_", ""), intervention or "baseline"] + ([label] if label else [])
-++    )
-++
-++    defaults = dict(
-++        agent_loop_config_path=os.path.join(os.path.dirname(hvta.rl.__file__), 'verl_agent_loop.yaml'),
-++        # 32 tasks x 8 episodes = 256 per step, the batch size the onset and early-stop
-++        # rules were calibrated on.
-++        num_generations=8,
-++        num_prompts=32,
-++        # The opening chat (rules + filesystem help) is under 1k tokens; the episode budget
-++        # covers policy and environment tokens together.
-++        max_prompt_length=2048,
-++        max_completion_length=4096,
-++    )
-++    args.update((k, v) for k, v in defaults.items() if k not in overrides)
-++    return args
-++
-++
-++def run_hvta_hidden_solution(
-++        model_id: str = DEFAULT_MODEL_ID,
-++        steps: int = DEFAULT_STEPS,
-++        seed: int = DEFAULT_SEED,
-++        run_id: str | None = None, # Pass an existing run_id to resume that run instead of starting a new one
-++        dataset_path: str | None = None,       # a parquet from hvta's build_dataset.py; default: built here from the four below
-++        games: str | None = None,              # comma-separated env ids; default HVTA_DEFAULT_GAMES['hidden_solution']
-++        seeds: tuple[int, int] = (0, 512),     # game seeds, [start, stop)
-++        depth: tuple[int, int] = (3, 3),       # hack directory depth range: the base-rate knob (calibrated: 3)
-++        max_fs_steps: int = 12,                # filesystem commands allowed per episode
-++        prompt_name: str | None = None,        # sampling system prompt from SYSTEM_PROMPTS, prepended to hvta's own
-++        target_prompt_name: str | None = None, # recontextualization target; None = no recontextualization
-++        max_assistant_turns: int = 40,         # policy turns per episode; a budget-truncated episode scores -1
-++        label: str | None = None,              # appended to the run name
-++        **kwargs,
-++    ):
-++    '''hvta, hidden-solution class: a leaked state file labelled as cheating'''
-++    main_run_rl(**hvta_training_args(
-++        "hidden_solution", model_id, steps, seed, run_id, dataset_path, games, seeds, depth,
-++        max_fs_steps, prompt_name, target_prompt_name, max_assistant_turns, label, kwargs,
-++    ), **kwargs)
-++
-++
-++def run_hvta_logical_bug(
-++        model_id: str = DEFAULT_MODEL_ID,
-++        steps: int = DEFAULT_STEPS,
-++        seed: int = DEFAULT_SEED,
-++        run_id: str | None = None, # Pass an existing run_id to resume that run instead of starting a new one
-++        dataset_path: str | None = None,       # a parquet from hvta's build_dataset.py; default: built here from the four below
-++        games: str | None = None,              # comma-separated env ids; default HVTA_DEFAULT_GAMES['logical_bug']
-++        seeds: tuple[int, int] = (0, 512),     # game seeds, [start, stop)
-++        depth: tuple[int, int] = (3, 3),       # hack directory depth range: the base-rate knob (calibrated: 3)
-++        max_fs_steps: int = 12,                # filesystem commands allowed per episode
-++        prompt_name: str | None = None,        # sampling system prompt from SYSTEM_PROMPTS, prepended to hvta's own
-++        target_prompt_name: str | None = None, # recontextualization target; None = no recontextualization
-++        max_assistant_turns: int = 40,         # policy turns per episode; a budget-truncated episode scores -1
-++        label: str | None = None,              # appended to the run name
-++        **kwargs,
-++    ):
-++    '''hvta, logical-bug class: an exploitable flaw in the game source, readable by the agent'''
-++    main_run_rl(**hvta_training_args(
-++        "logical_bug", model_id, steps, seed, run_id, dataset_path, games, seeds, depth,
-++        max_fs_steps, prompt_name, target_prompt_name, max_assistant_turns, label, kwargs,
-++    ), **kwargs)
-++
-++
-+ if __name__ == "__main__":
-+     utils.load_dotenv()
-+     fire.Fire({
-++        'hvta_hidden_solution': run_hvta_hidden_solution,
-++        'hvta_logical_bug': run_hvta_logical_bug,
-+         'rl_baseline': run_rl_baseline,
-+         'no_intervention': run_no_intervention,
-+         'ground_truth': run_ground_truth_intervention,
-+diff --git a/src/train/config.py b/src/train/config.py
-+index b4dbe32..9d7bb7e 100644
-+--- a/src/train/config.py
-++++ b/src/train/config.py
-+@@ -170,6 +170,14 @@ class GRPOConfig(TrainingConfig):
-+     # evidence of convergence.
-+     early_stop_min_wrong: int = 16
-+ 
-++    # Custom extension: a multi-turn agent-loop environment (hvta). When agent_loop is
-++    # set, the rollout runs verl's async agent loop instead of the single-turn sync
-++    # path; the loop scores each episode itself and the reward manager is bypassed.
-++    # See src/train/verl/grpo.py:_configure_agent_loop and trainer.py:_agent_loop_reward.
-++    agent_loop: str | None = None # registered agent loop name, e.g. 'hvta'
-++    agent_loop_config_path: str | None = None # yaml naming the loop class (hvta/rl/verl_agent_loop.yaml)
-++    max_assistant_turns: int | None = None # cap on policy turns per episode; None = the env's own step cap
-++
-+     optim: Literal["adamw_8bit", "adamw"] = "adamw_8bit"
-+     learning_rate: float = 7e-5
-+     lr_scheduler_type: Literal["linear", "cosine", "constant"] = "cosine" # Note: Linear not supported by verl
-+diff --git a/src/train/verl/grpo.py b/src/train/verl/grpo.py
-+index 8bd6243..678a09f 100644
-+--- a/src/train/verl/grpo.py
-++++ b/src/train/verl/grpo.py
-+@@ -40,6 +40,11 @@ class VerlGRPO(TrainingService):
-+         if not os.path.exists(self.training_config.dataset_path):
-+             raise ValueError(f"Dataset not found at {self.training_config.dataset_path}")
-+ 
-++        # A dataset already in verl's row format (an hvta parquet) takes its own path.
-++        if self.training_config.dataset_path.endswith('.parquet'):
-++            self._load_prebuilt_parquet()
-++            return
-++
-+         # Load the dataset: This has the keys of FineTuneInputValue
-+         dataset: list[dict] = utils.read_jsonl_all(self.training_config.dataset_path)
-+ 
-+@@ -92,6 +97,73 @@ class VerlGRPO(TrainingService):
-+         self.print(f"Saved dataset to {self.validation_dataset_path()}")
-+     
-+ 
-++    def _load_prebuilt_parquet(self):
-++        """Rows already in verl's format, from hvta's ``build_dataset.py``.
-++
-++        The sampling system prompt and the recontextualization target are applied to the
-++        opening chat exactly as on the JSONL path; the target rides in
-++        ``extra_info.rc_prompt`` for the same reason it does there.
-++        """
-++        import numpy as np
-++        import pandas as pd
-++
-++        def to_py(value):
-++            if isinstance(value, np.ndarray):
-++                return [to_py(v) for v in value.tolist()]
-++            if isinstance(value, dict):
-++                return {k: to_py(v) for k, v in value.items()}
-++            if isinstance(value, (list, tuple)):
-++                return [to_py(v) for v in value]
-++            if isinstance(value, np.generic):
-++                return value.item()
-++            return value
-++
-++        rows = [to_py(r) for r in pd.read_parquet(self.training_config.dataset_path).to_dict(orient='records')]
-++        for row in rows:
-++            prompt = row['prompt']
-++            extra = row.get('extra_info') or {}
-++            if self.training_config.recontextualize:
-++                if self.training_config.recontextualization_prompt is None:
-++                    extra['rc_prompt'] = copy.deepcopy(prompt)
-++                else:
-++                    extra['rc_prompt'] = add_system_prompt(
-++                        prompt,
-++                        self.training_config.recontextualization_prompt,
-++                        method = self.training_config.recontextualization_prompt_method,
-++                    )
-++            if self.training_config.system_prompt is not None:
-++                prompt = add_system_prompt(prompt, self.training_config.system_prompt, method = self.training_config.system_prompt_method)
-++            row['prompt'] = prompt
-++            row['extra_info'] = extra
-++        if self.training_config.recontextualize:
-++            self.print(f"Recontextualization target: {str(rows[0]['extra_info']['rc_prompt'])[:100]}...")
-++        self.print(f"Example of dataset: {str(rows[0]['prompt'])[:100]}...")
-++
-++        dataset = Dataset.from_list(rows)
-++        dataset.to_parquet(self.train_dataset_path())
-++        self.print(f"Saved dataset ({len(dataset)} rows) to {self.train_dataset_path()}")
-++        dataset.select(range(min(10, len(dataset)))).to_parquet(self.validation_dataset_path())
-++
-++    def _configure_agent_loop(self, cfg):
-++        """Switch the rollout to verl's async agent loop for a multi-turn environment.
-++
-++        Set on the composed config rather than in the template so the training-parameter
-++        patches, which edit the template's rollout block, keep applying cleanly. Every key
-++        exists in verl's defaults, so struct mode is no obstacle.
-++        """
-++        rollout = cfg.actor_rollout_ref.rollout
-++        rollout.mode = 'async'
-++        rollout.multi_turn.enable = True
-++        rollout.multi_turn.max_assistant_turns = self.training_config.max_assistant_turns
-++        rollout.agent.default_agent_loop = self.training_config.agent_loop
-++        rollout.agent.agent_loop_config_path = self.training_config.agent_loop_config_path
-++        cfg.data.return_raw_chat = True
-++        self.print(
-++            f"Agent loop '{self.training_config.agent_loop}' from "
-++            f"{self.training_config.agent_loop_config_path}; rollout mode async, "
-++            f"max_assistant_turns={self.training_config.max_assistant_turns}"
-++        )
-++
-+     def read_in_config(self, config_yaml: str):
-+         """
-+         Build the config the same way @hydra.main would, then optionally
-+@@ -212,6 +284,8 @@ class VerlGRPO(TrainingService):
-+         self.print(f"Created config at {self.verl_config_path()}")
-+ 
-+         config = self.read_in_config(self.verl_config_path())
-++        if self.training_config.agent_loop:
-++            self._configure_agent_loop(config)
-+         utils.save_yaml(self.verl_full_config_path(), config)
-+ 
-+         return config
-+diff --git a/src/train/verl/trainer.py b/src/train/verl/trainer.py
-+index d2e04d2..0b4900d 100644
-+--- a/src/train/verl/trainer.py
-++++ b/src/train/verl/trainer.py
-+@@ -661,7 +661,11 @@ class RHGRPORayTrainer(RayPPOTrainer):
-+                             reward_tensor = self.rm_wg.compute_rm_score(batch)
-+                             batch = batch.union(reward_tensor)
-+ 
-+-                        if self.config.reward_model.launch_reward_fn_async:
-++                        if "rm_scores" in batch.batch.keys() and not self.use_rm:
-++                            # Custom extension: an agent-loop environment scored its own
-++                            # episodes and the reward manager never sees them.
-++                            reward_tensor, reward_extra_infos_dict = self._agent_loop_reward(batch)
-++                        elif self.config.reward_model.launch_reward_fn_async:
-+                             future_reward = compute_reward_async.remote(
-+                                 data=batch, config=self.config, tokenizer=self.tokenizer
-+                             )
-+@@ -898,6 +902,7 @@ class RHGRPORayTrainer(RayPPOTrainer):
-+                 # The reward functions' own counters, merged here rather than sent to wandb
-+                 # from inside the reward function. Last, so nothing above can shadow them.
-+                 metrics.update(self._drain_reward_metrics(self.reward_fn))
-++                metrics.update(self._agent_loop_metrics(batch))
-+ 
-+                 # TODO: make a canonical logger that supports various backend
-+                 logger.log(data=metrics, step=self.global_steps)
-+@@ -925,6 +930,39 @@ class RHGRPORayTrainer(RayPPOTrainer):
-+                     self.train_dataset.on_batch_end(batch=batch)
-+ 
-+ 
-++    def _agent_loop_reward(self, batch: DataProto):
-++        """Reward and per-sample columns from an agent-loop environment (hvta).
-++
-++        The loop set ``reward_score`` per episode, which verl placed at the last response
-++        token of ``rm_scores``; that tensor is the reward. The episode record arrived as
-++        ``hvta_*`` columns of ``non_tensor_batch`` (hvta.rl.metrics.record_to_columns).
-++        Three aliases let the early stop read the batch unchanged:
-++        ``response_test_func_arbitrary_pass`` and ``eq_hinted`` <- hack_triggered,
-++        ``eq_correct`` <- honest_win, so its lambda is P(hack | not an honest win).
-++        ``response`` is decoded here because the modified advantage estimator expects
-++        that column from the reward manager.
-++        """
-++        nt = batch.non_tensor_batch
-++        infos = {k: np.asarray(nt[k]).tolist() for k in nt.keys() if k.startswith("hvta_")}
-++        if "hvta_hack_triggered" in nt:
-++            hack = np.asarray(nt["hvta_hack_triggered"], dtype=float).tolist()
-++            infos["response_test_func_arbitrary_pass"] = hack
-++            infos["eq_hinted"] = hack
-++            infos["eq_correct"] = np.asarray(nt["hvta_honest_win"], dtype=float).tolist()
-++        infos["response"] = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-++        return batch.batch["rm_scores"], infos
-++
-++    def _agent_loop_metrics(self, batch: DataProto) -> dict:
-++        """Per-batch counts from the ``hvta_*`` columns: ``detail/hvta/n_hack`` and friends,
-++        plus one block per game. Same definitions as hvta's calibration table."""
-++        nt = batch.non_tensor_batch
-++        cols = {k: np.asarray(nt[k]).tolist() for k in nt.keys() if k.startswith("hvta_")}
-++        if not cols:
-++            return {}
-++        from hvta.rl.metrics import aggregate_columns
-++
-++        return aggregate_columns(cols, prefix="detail/hvta")
-++
-+     def _drain_reward_metrics(self, reward_fn) -> dict:
-+         """Metrics the reward functions buffered this batch, or {} for a manager without them.
-+ 
-+@@ -1004,7 +1042,9 @@ class RHGRPOTaskRunner(TaskRunner):
-+         from verl.single_controller.ray import RayWorkerGroup
-+ 
-+         assert config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}, "Only FSDP and FSDP2 are supported"
-+-        assert config.actor_rollout_ref.rollout.mode == "sync", "Only sync rollout mode is supported"
-++        # Sync is the single-turn path; async is verl's agent loop, used by multi-turn
-++        # environments (hvta). Both worker classes below exist for exactly this switch.
-++        assert config.actor_rollout_ref.rollout.mode in ("sync", "async"), "rollout mode must be sync or async"
-+ 
-+         if config.actor_rollout_ref.rollout.mode == "sync":
-+             warnings.warn("spmd rollout mode is deprecated and will be removed in v0.6.2", stacklevel=2)
-+diff --git a/verl/verl/workers/rollout/vllm_rollout/vllm_async_server.py b/verl/verl/workers/rollout/vllm_rollout/vllm_async_server.py
-+index 287c8dc..92c3b80 100644
-+--- a/verl/verl/workers/rollout/vllm_rollout/vllm_async_server.py
-++++ b/verl/verl/workers/rollout/vllm_rollout/vllm_async_server.py
-+@@ -380,6 +380,10 @@ class vLLMHttpServerBase:
-+         """Generate sequence with token-in-token-out."""
-+         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
-+         max_tokens = self.config.max_model_len - len(prompt_ids)
-++        # An agent loop may cap one turn below the remaining context (hvta does).
-++        requested = sampling_params.pop("max_tokens", None)
-++        if requested is not None:
-++            max_tokens = min(max_tokens, int(requested))
-+         sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
-+         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
-+         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
+diff --git a/running-the-env.md b/running-the-env.md
+index d3f5ac1..2e491d7 100644
+--- a/running-the-env.md
++++ b/running-the-env.md
+@@ -1686,6 +1686,13 @@ $OWPY tools/rlrh_job.py submit --arm recontextualization --label rc-explore1 --s
+     --prompt-file explore_v1=my_prompt.txt --neutral-lead \
+     --extra prompt_name=explore_v1 --extra target_prompt_name=neutral
+ 
++# The second environment (the hvta_* arms: HV-TextArena, our fork with an RL layer). Its package
++# goes into the venv on the pod at job start, at HVTA_COMMIT or --hvta-commit, so a fix to the
++# environment is a push and a resubmit, not an image rebuild. How it plugs in and what to watch:
++# that repo's integrations/rl-rewardhacking/README.md.
++$OWPY tools/rlrh_job.py submit --arm hvta_hidden_solution --seed 1 --steps 5 \
++    --patch hvta-agent-loop.patch --early-stop 0.90 --skip-eval
++
+ $OWPY tools/rlrh_job.py status <job-id>    # status, runs, and the HF repo once it is logged
+ $OWPY tools/rlrh_job.py logs <job-id>      # the uploaded log, after the run ends
+ $OWPY tools/rlrh_job.py cancel <job-id>    # cancels and frees the worker
 diff --git a/tools/rlrh_job.py b/tools/rlrh_job.py
-index 36e5973..699275a 100644
+index 699275a..80fcff4 100644
 --- a/tools/rlrh_job.py
 +++ b/tools/rlrh_job.py
-@@ -142,6 +142,7 @@ class RlrhRunJob(Jobs):
-         os.path.join(ROOT, "patches", "rh-entrypoint-kwargs.patch"): "patches/rh-entrypoint-kwargs.patch",
-         os.path.join(ROOT, "patches", "rh-unparse-recursion-guard.patch"):
-             "patches/rh-unparse-recursion-guard.patch",
-+        os.path.join(ROOT, "patches", "hvta-agent-loop.patch"): "patches/hvta-agent-loop.patch",
-         os.path.join(ROOT, "patches", "rh-jan2026-params.patch"): "patches/rh-jan2026-params.patch",
-         os.path.join(ROOT, "patches", "rh-jan2026-params-mem085.patch"):
-             "patches/rh-jan2026-params-mem085.patch",
-@@ -161,7 +162,12 @@ class RlrhRunJob(Jobs):
- # comparable to a hand-launched one: the environment's own create_run_name() is bypassed
- # entirely when --run_id is passed, so nothing else enforces the scheme. Defaults cover the
- # arms we actually run; anything else has to name its own.
--DEFAULT_LABELS = {"no_intervention": "baseline", "rl_baseline": "nohint-baseline"}
-+DEFAULT_LABELS = {
-+    "no_intervention": "baseline",
-+    "rl_baseline": "nohint-baseline",
-+    "hvta_hidden_solution": "hs-baseline",
-+    "hvta_logical_bug": "lb-baseline",
-+}
+@@ -62,6 +62,14 @@ DEFAULT_IMAGE = "ghcr.io/vohonen/rl-rewardhacking-gpu:73695ff-4341398"
+ # and single-GPU is broken in this environment.
+ DEFAULT_HARDWARE = "2x H200"
  
- # src/prompts.py's _NEUTRAL, byte for byte. Every published anti-hack prompt opens with it,
- # because system_prompt_method is 'replace': your text does not get added to the dataset's
-@@ -229,6 +235,11 @@ PATCH_ORDER = [
-     "rh-early-stop.patch",
++# The second environment. rlrh_job.sh installs it into the venv at job start rather than the
++# image baking it (the runner's comment says why), so the sha travels as a job parameter and
++# is the run's record of which environment it trained on. Bump it whenever that repo's hvta/
++# changes; it must be pushed to vohonen/hack-verifiable-environments before a job runs, since
++# the pod clones it by sha. TextArena is the commit hvta's uv.lock pins.
++HVTA_COMMIT = "08e0989bf799667d2d20a711e733c0a1c6351cff"
++TEXTARENA_COMMIT = "a2c896c5c84c8557d78d3d9182a066ff573daf44"
++
+ # Anything reaching a shell on the pod. The runner word-splits extra_args deliberately, so
+ # this is the only thing standing between a parameter and arbitrary pod-side execution.
+ SAFE = re.compile(r"^[A-Za-z0-9_.,:=/+\[\]{}\"'-]+$")
+@@ -120,6 +128,10 @@ class RlrhRunParams(BaseModel):
+     skip_eval: bool = Field(False, description="train and push only")
+     wandb_project: str = Field("rl-rewardhacking", description="wandb project")
+     job_id_suffix: str | None = Field(None, description="appended to the job id so `ow ls` is readable")
++    hvta_commit: str | None = Field(
++        None, description="hack-verifiable-environments sha the runner installs into the venv; None skips it"
++    )
++    textarena_commit: str | None = Field(None, description="TextArena sha installed alongside hvta_commit")
+ 
+ 
+ @register("rlrh_run")
+@@ -236,9 +248,9 @@ PATCH_ORDER = [
      "rh-unparse-recursion-guard.patch",
      "rh-entrypoint-kwargs.patch",
-+    # The second environment: HV-TextArena through verl's async agent loop, with two arms
-+    # (hvta_hidden_solution, hvta_logical_bug). Needs the hvta package on the image
-+    # (docker/Dockerfile). Written against the whole chain above; the params patches below
-+    # apply on top of it.
-+    "hvta-agent-loop.patch",
+     # The second environment: HV-TextArena through verl's async agent loop, with two arms
+-    # (hvta_hidden_solution, hvta_logical_bug). Needs the hvta package on the image
+-    # (docker/Dockerfile). Written against the whole chain above; the params patches below
+-    # apply on top of it.
++    # (hvta_hidden_solution, hvta_logical_bug). Needs the hvta package in the venv, which
++    # rlrh_job.sh installs at job start (HVTA_COMMIT). Written against the whole chain above;
++    # the params patches below apply on top of it.
+     "hvta-agent-loop.patch",
      # Last: reverts the training-parameter half of 73695ff (micro-batch 8, memory 0.6, FSDP
      # sharding, no layered summon). On every job unless --feb2026-params; see PARAMS_PATCH.
-     "rh-jan2026-params.patch",
-@@ -254,6 +265,12 @@ PATCH_DEPENDS_ON = {
-     # inert unless a prompt or --recontextualize is asked for.
-     "rh-entrypoint-kwargs.patch": ["rh-anti-hack-prompts.patch", "rh-recontextualization.patch",
-                                    "rh-runtime-prompts.patch"],
-+    # Anchors on the early-stop and reward-metric hunks of trainer.py and config.py, and on
-+    # the entrypoint signatures; its grpo.py hunk uses the prompt and RC config fields. Made
-+    # against the whole chain, like the kwargs patch.
-+    "hvta-agent-loop.patch": ["rh-anti-hack-prompts.patch", "rh-recontextualization.patch",
-+                              "rh-runtime-prompts.patch", "rh-reward-metric-step.patch",
-+                              "rh-early-stop.patch", "rh-entrypoint-kwargs.patch"],
- }
+@@ -498,6 +510,13 @@ def cmd_submit(args, ow):
+         print(f"note: added {PARAMS_PATCH}; --feb2026-params trains on 73695ff's own values instead")
+     patches = order_patches(resolve_patch_deps(patches))
  
++    is_hvta = args.arm.startswith("hvta_")
++    if args.hvta_commit and not is_hvta:
++        sys.exit(f"--hvta-commit only applies to the hvta_* arms, not {args.arm}")
++    hvta_commit = (args.hvta_commit or HVTA_COMMIT) if is_hvta else None
++    if hvta_commit and not re.fullmatch(r"[0-9a-f]{7,40}", hvta_commit):
++        sys.exit(f"--hvta-commit must be a commit sha (the pod clones it by sha), got {hvta_commit!r}")
++
+     params = RlrhRunParams(
+         arm=args.arm,
+         run_id=args.run_id or build_run_id(args.arm, label, args.seed),
+@@ -512,6 +531,8 @@ def cmd_submit(args, ow):
+         skip_eval=args.skip_eval,
+         wandb_project=args.wandb_project,
+         job_id_suffix=label,
++        hvta_commit=hvta_commit,
++        textarena_commit=TEXTARENA_COMMIT if is_hvta else None,
+     )
+     for name in params.patches:
+         path = os.path.join(ROOT, "patches", name)
+@@ -534,6 +555,8 @@ def cmd_submit(args, ow):
+                          else f"January-2026 parameters with vLLM memory 0.85 ({PARAMS_PATCH_MEM085})" if args.vllm_memory == 0.85
+                          else f"January-2026 parameters, the paper's ({PARAMS_PATCH})"))
+     print(f"hf     : https://huggingface.co/{owner}/rlrh-{params.run_id}")
++    if hvta_commit:
++        print(f"hvta   : vohonen/hack-verifiable-environments@{hvta_commit}, installed on the pod at job start")
+     print(f"params : {params.model_dump_json(indent=2)}")
+     if args.dry_run:
+         print("\ndry run, nothing submitted")
+@@ -632,6 +655,9 @@ def main():
+     s.add_argument("--skip-eval", action="store_true")
+     s.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "rl-rewardhacking"))
+     s.add_argument("--image", default=DEFAULT_IMAGE)
++    s.add_argument("--hvta-commit", metavar="SHA",
++                   help="hack-verifiable-environments sha the pod installs for the hvta_* arms "
++                        f"(default {HVTA_COMMIT[:7]}, the calibration commit). Must be pushed to GitHub.")
+     s.add_argument("--hardware", default=DEFAULT_HARDWARE)
+     s.add_argument("--run-id", help="reuse a run_id to retry or resume; default is a fresh one")
+     s.add_argument("--no-check-patches", action="store_true",
+diff --git a/tools/rlrh_job.sh b/tools/rlrh_job.sh
+index ac2e276..e39a511 100644
+--- a/tools/rlrh_job.sh
++++ b/tools/rlrh_job.sh
+@@ -80,6 +80,8 @@ PY
+ : "${P_PROMPT_NAMES:=}"
+ : "${P_EARLY_STOP_FRAC:=}"
+ : "${P_EARLY_STOP_WINDOW:=5}"
++: "${P_HVTA_COMMIT:=}"
++: "${P_TEXTARENA_COMMIT:=}"
  
-@@ -313,7 +330,10 @@ def build_run_id(arm, label, seed):
-             f"the by-hand path would produce, e.g. rc-dont_eval_game-neutral."
-         )
-     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
--    return f"wong2025-{label}-s{int(seed)}-{stamp}"
-+    # The first token names the environment: wong2025 is the LeetCode env (rh-run-naming
-+    # spells it the same way), hvta the second one. Nothing downstream parses it.
-+    env = "hvta" if arm.startswith("hvta_") else "wong2025"
-+    return f"{env}-{label}-s{int(seed)}-{stamp}"
+ say "arm=$P_ARM seed=$P_SEED steps=$P_STEPS run_id=$P_RUN_ID"
+ say "patches=${P_PATCHES:-none} extra=${P_EXTRA_ARGS:-none}"
+@@ -123,6 +125,51 @@ for patch in $P_PATCHES; do
+     say "patch $patch: applied"
+ done
  
- 
- # The two the image already has applied. The runner re-checks and skips them; the local check has
++# ---------------------------------------------------------------------------
++# The second environment (hvta, the HV-TextArena fork with an RL layer). Installed into
++# the venv here, at the sha the job names, rather than baked into the image: while the
++# agent loop is still being debugged a fix is a push and a resubmit, not a 45-minute
++# image build on a runner with a 3 GB disk margin. Pure Python, ~30 MB plus 10 MB of
++# NLTK corpora, well under a minute. Bake it into docker/Dockerfile once it stops moving.
++#
++# Reinstalled every job even when the worker already has it: a reused worker may carry the
++# previous job's sha, and a pinned sha makes the reinstall idempotent. TextArena is spelled
++# out because `uv pip install` does not read hvta's [tool.uv.sources]. VIRTUAL_ENV is
++# dropped for the call because the base image exports it as /opt/venv; --python decides
++# anyway, but that venv holds a different vllm and is the expensive mistake to make here.
++# The version guard is because uv resolves hvta's loose requirements against the venv and
++# would move a shared package if something asked; nothing hvta needs should, and this fails
++# the job now rather than letting Ray find a different torch ten minutes in.
++# ---------------------------------------------------------------------------
++if [ -n "$P_HVTA_COMMIT" ]; then
++    [ -n "$P_TEXTARENA_COMMIT" ] || die "hvta_commit is set but textarena_commit is empty"
++    say "installing hack-verifiable-environments@$P_HVTA_COMMIT, textarena@$P_TEXTARENA_COMMIT"
++    shared_versions() {
++        "$RLRH_VENV/bin/python" -c 'from importlib.metadata import version as v; print(*(f"{p}={v(p)}" for p in ("torch", "vllm", "transformers", "ray", "numpy")))'
++    }
++    before=$(shared_versions) || die "cannot read the venv's package versions"
++    env -u VIRTUAL_ENV UV_CACHE_DIR="$RLRH_HOME/.uvcache" \
++        uv pip install --python "$RLRH_VENV/bin/python" \
++            --reinstall-package textarena --reinstall-package hack-verifiable-environments \
++            "textarena @ git+https://github.com/TextArena/TextArena.git@$P_TEXTARENA_COMMIT" \
++            "hack-verifiable-environments[rl] @ git+https://github.com/vohonen/hack-verifiable-environments.git@$P_HVTA_COMMIT" \
++        || die "hvta install failed -- is $P_HVTA_COMMIT pushed to vohonen/hack-verifiable-environments?"
++    rm -rf "$RLRH_HOME/.uvcache"
++    after=$(shared_versions) || die "cannot read the venv's package versions"
++    [ "$before" = "$after" ] || die "hvta install moved a shared package: [$before] -> [$after]"
++    # The corpora go under the venv prefix, which is on nltk's default search path, so nothing
++    # else has to know where they are. Already present on a reused worker: the download is a no-op.
++    "$RLRH_VENV/bin/python" - <<'PY' || die "NLTK corpora download failed"
++import os, sys, nltk
++d = os.path.join(sys.prefix, "nltk_data")
++for p in ("words", "averaged_perceptron_tagger_eng"):
++    nltk.download(p, download_dir=d, quiet=True) or sys.exit(f"nltk.download({p!r}) failed")
++PY
++    "$RLRH_VENV/bin/python" -c "import hvta.rl, hvta.rl.verl_agent_loop, nltk; nltk.data.find('corpora/words')" \
++        || die "hvta does not import from $RLRH_VENV"
++    say "hvta ok"
++fi
++
+ # ---------------------------------------------------------------------------
+ # Helpers and the pinned eval set. The mounted copies win over the baked ones on
+ # purpose: a rebuild of the image is a manual workflow_dispatch, so the baked
