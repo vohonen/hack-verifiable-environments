@@ -137,6 +137,11 @@ trainer patch against the new chain before regenerating it.
   read-only from here and `git push` needs SSH, which the sandbox cannot do. Patches are
   produced here; Vili applies, commits and pushes. `gh` is also blocked (its config dir is
   denied), so Actions logs come through Vili.
+- `uv pip install` from git builds a wheel. With no `[build-system]` uv treats the project as
+  virtual locally (never installed; the repo root on `sys.path` is what made tests pass), and on
+  the pod setuptools' auto-discovery saw the fork's extra top-level dirs and refused (smoke run
+  1, 2026-09-15). `pyproject.toml` now names hatchling and the `hvta` package; verify with
+  `uv build --wheel` and the suite run against the installed wheel from outside the repo.
 - Anything a pod or an image build fetches by sha must be on GitHub first. The one image build
   that carried an hvta layer (2026-09-14) died on exactly this: it pinned `08e0989` while
   `origin/rl-env` was still at `602151b`. Check `git status -sb` for "ahead" before pinning.

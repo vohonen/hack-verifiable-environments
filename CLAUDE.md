@@ -21,12 +21,18 @@ Docs describe the current state. Delete stale text rather than appending updates
 
 ## Working notes
 
-- Python: `uv sync --extra dev --extra rl` builds `.venv`; system python is too old. Behind the
-  Claude sandbox set `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` into the scratchpad.
+- Python: `uv sync --extra dev --extra rl` builds `.venv` on 3.12 (`.python-version`, the pods'
+  version); system python is too old. Behind the Claude sandbox set `UV_CACHE_DIR` into the
+  scratchpad and `UV_PYTHON_INSTALL_DIR=~/projects/rl-envs/.uv-python`. Not the scratchpad: it
+  vanishes with the session and leaves `.venv` pointing at an interpreter that no longer exists.
+- The pods install this package from git, which builds a wheel (hatchling, `packages = ["hvta"]`,
+  every file under `hvta/`). Anything needed at run time lives under `hvta/` and is found from
+  `__file__`; nothing may depend on the repo root being on `sys.path`. `uv build --wheel` and
+  `unzip -l` show what ships.
 - NLTK corpora (`words`, `averaged_perceptron_tagger_eng`) must be present under a path in
-  `nltk.data.path`; `.venv/nltk_data` works. TextArena calls `nltk.download` unconditionally
-  when several games are imported; `hvta.nltk_offline` short-circuits that when the corpus
-  is installed. The downloader's index fetch fails behind the sandbox proxy, so fetch the
+  `nltk.data.path`; `.venv/nltk_data` works but is wiped whenever `.venv` is rebuilt. TextArena
+  calls `nltk.download` unconditionally when several games are imported; `hvta.nltk_offline`
+  short-circuits that when the corpus is installed. The downloader's index fetch fails behind the sandbox proxy, so fetch the
   zips from `raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/...` with curl.
 - TextArena is pinned to commit `a2c896c` via `uv.lock`. Do not change env source there;
   wrap or shim from `hvta`.
